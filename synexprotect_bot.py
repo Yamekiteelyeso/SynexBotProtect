@@ -343,7 +343,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 async def bot_say(interaction: discord.Interaction, message: str, channel: discord.TextChannel | None = None):
     target = channel or interaction.channel
     await target.send(message, allowed_mentions=discord.AllowedMentions(everyone=False, roles=False))
-    await interaction.response.send_message(notice(f"✅ Message sent to {target.mention}."), ephemeral=True)
+    await interaction.response.send_message(embed=notice(f"✅ Message sent to {target.mention}."), ephemeral=True)
 
 
 # ---------------------------------------------------------------- /embed (admin)
@@ -394,7 +394,7 @@ async def embed_cmd(
         embed.description = "​"
 
     await interaction.channel.send(embed=embed)
-    await interaction.response.send_message(notice("✅ Embed sent."), ephemeral=True)
+    await interaction.response.send_message(embed=notice("✅ Embed sent."), ephemeral=True)
 
 
 # ---------------------------------------------------------------- /emojisteal (admin)
@@ -475,20 +475,20 @@ async def addemojirole(
     me = interaction.guild.me
     if role.is_default() or role.managed or role >= me.top_role:
         return await interaction.response.send_message(
-            error_notice("I can't manage that role. Make sure it's below my highest role and isn't managed by an integration."),
+            embed=error_notice("I can't manage that role. Make sure it's below my highest role and isn't managed by an integration."),
             ephemeral=True,
         )
 
     key = emoji_key_from_input(emoji)
     if key is None:
-        return await interaction.response.send_message(error_notice("Invalid emoji. Paste the emoji itself."), ephemeral=True)
+        return await interaction.response.send_message(embed=error_notice("Invalid emoji. Paste the emoji itself."), ephemeral=True)
 
     msg_id = None
     if message_id:
         try:
             msg_id = int(message_id.strip())
         except ValueError:
-            return await interaction.response.send_message(error_notice("Invalid message ID."), ephemeral=True)
+            return await interaction.response.send_message(embed=error_notice("Invalid message ID."), ephemeral=True)
 
     guild_key = str(interaction.guild_id)
     rules = reaction_roles.setdefault(guild_key, [])
@@ -828,11 +828,11 @@ async def timer_cmd(interaction: discord.Interaction, time: str, reminder: str):
 async def timer_prefix(ctx: commands.Context, *, args: str = ""):
     parts = args.split(maxsplit=1)
     if len(parts) < 2:
-        return await ctx.send(error_notice("Usage: `!timer <time> <reminder>`, e.g. `!timer 10m Check the oven`"))
+        return await ctx.send(embed=error_notice("Usage: `!timer <time> <reminder>`, e.g. `!timer 10m Check the oven`"))
 
     seconds = _parse_timer_time(parts[0])
     if seconds is None:
-        return await ctx.send(error_notice("Use a time between 5 seconds and 30 days, e.g. `10m`, `2h`, `1d`."))
+        return await ctx.send(embed=error_notice("Use a time between 5 seconds and 30 days, e.g. `10m`, `2h`, `1d`."))
 
     try:
         await ctx.message.delete()
@@ -876,6 +876,8 @@ ENTRIES_BUTTON_ID = "giveaway:entries"
 TADA_EMOJI = "<a:tada:1567977830346924092>"
 DEFAULT_AVATAR = "https://cdn.discordapp.com/embed/avatars/0.png"
 DEFAULT_RECLAIM = "1h"
+LINK_EMOJI = "<:link:1567987020503195842>"
+WON_EMOJI = "<a:emoji_25:1567977812617469990>"
 
 
 def _is_duration(token: str) -> bool:
@@ -945,7 +947,7 @@ def build_giveaway_layout(data: dict) -> discord.ui.LayoutView:
 async def _join_callback(interaction: discord.Interaction):
     data = giveaways.get(interaction.message.id)
     if not data or data["ended"]:
-        return await interaction.response.send_message(notice("This giveaway has ended."), ephemeral=True)
+        return await interaction.response.send_message(embed=notice("This giveaway has ended."), ephemeral=True)
 
     uid = interaction.user.id
     if uid in data["entries"]:
@@ -956,13 +958,13 @@ async def _join_callback(interaction: discord.Interaction):
         msg = "✅ You're entered!"
 
     await interaction.response.edit_message(view=build_giveaway_layout(data))
-    await interaction.followup.send(notice(msg), ephemeral=True)
+    await interaction.followup.send(embed=notice(msg), ephemeral=True)
 
 
 async def _entries_callback(interaction: discord.Interaction):
     data = giveaways.get(interaction.message.id)
     if not data:
-        return await interaction.response.send_message(notice("This giveaway no longer exists."), ephemeral=True)
+        return await interaction.response.send_message(embed=notice("This giveaway no longer exists."), ephemeral=True)
 
     entrants = list(data["entries"])
     count = len(entrants)
@@ -1047,6 +1049,55 @@ async def _resolve_user(uid: int) -> discord.User | None:
     return user
 
 
+def build_dm_layout(uid: int, info: dict, state: str) -> discord.ui.LayoutView:
+    """Private DM to the winner. state: 'pending', 'claimed' or 'rerolled'."""
+    if state == "claimed":
+        footer = "✅ Prize claimed. Enjoy!"
+    elif state == "rerolled":
+        footer = "⏭️ Time ran out, so a new winner was picked."
+    else:
+        footer = (
+            f"<@{uid}> You have until <t:{info['deadline']}:T> "
+            f"(<t:{info['deadline']}:R>) before the reroll is done"
+        )
+
+    link = discord.ui.Button(
+        label="Go to the giveaway",
+        emoji=LINK_EMOJI,
+        style=discord.ButtonStyle.link,
+        url=info["jump_url"],
+    )
+    row = discord.ui.ActionRow()
+    row.add_item(link)
+
+    container = discord.ui.Container(
+        discord.ui.TextDisplay(f"### {WON_EMOJI} You won a Giveaway!"),
+        discord.ui.Separator(visible=True),
+        discord.ui.TextDisplay("Claim your reward by pressing the button below"),
+        discord.ui.TextDisplay(footer),
+        discord.ui.Separator(visible=True),
+        row,
+        accent_colour=STEEL,
+    )
+    layout = discord.ui.LayoutView(timeout=None)
+    layout.add_item(container)
+    return layout
+
+
+async def _edit_dm(uid: int, info: dict, state: str) -> None:
+    dm_id = info.get("dm_id")
+    if not dm_id:
+        return
+    user = await _resolve_user(uid)
+    if user is None:
+        return
+    try:
+        dm = await user.create_dm()
+        await dm.get_partial_message(dm_id).edit(view=build_dm_layout(uid, info, state))
+    except discord.HTTPException:
+        pass
+
+
 def build_winner_layout(gid: int, uid: int, info: dict, state: str) -> discord.ui.LayoutView:
     """state: 'pending' (claim button shown), 'claimed' or 'rerolled'."""
     data = giveaways.get(gid)
@@ -1079,7 +1130,7 @@ def build_winner_layout(gid: int, uid: int, info: dict, state: str) -> discord.u
         claim = discord.ui.Button(
             label="Claim prize",
             emoji="🎁",
-            style=discord.ButtonStyle.primary,
+            style=discord.ButtonStyle.secondary,
             custom_id=f"giveaway:claim:{gid}:{uid}",
         )
         claim.callback = _make_claim_callback(gid, uid)
@@ -1097,22 +1148,23 @@ def _make_claim_callback(gid: int, uid: int):
     async def claim(interaction: discord.Interaction):
         if interaction.user.id != uid:
             return await interaction.response.send_message(
-                error_notice("Only the winner can claim this prize."), ephemeral=True
+                embed=error_notice("Only the winner can claim this prize."), ephemeral=True
             )
         data = giveaways.get(gid)
         info = data["announce"].get(uid) if data else None
         if info is None or info["status"] != "pending" or uid not in data["winners_list"]:
             return await interaction.response.send_message(
-                error_notice("This prize can no longer be claimed."), ephemeral=True
+                embed=error_notice("This prize can no longer be claimed."), ephemeral=True
             )
         if now_ts() > info["deadline"]:
             return await interaction.response.send_message(
-                error_notice("The claim time has expired."), ephemeral=True
+                embed=error_notice("The claim time has expired."), ephemeral=True
             )
 
         data["claimed"].add(uid)
         info["status"] = "claimed"
         await interaction.response.edit_message(view=build_winner_layout(gid, uid, info, "claimed"))
+        await _edit_dm(uid, info, "claimed")
 
     return claim
 
@@ -1130,6 +1182,7 @@ async def _edit_announce(gid: int, uid: int, state: str) -> None:
         await message.edit(view=build_winner_layout(gid, uid, info, state))
     except discord.HTTPException:
         pass
+    await _edit_dm(uid, info, state)
 
 
 async def _announce_winner(gid: int, uid: int) -> None:
@@ -1145,11 +1198,23 @@ async def _announce_winner(gid: int, uid: int) -> None:
         "deadline": now_ts() + data["reclaim_seconds"],
         "channel_id": channel.id,
         "message_id": 0,
+        "jump_url": "",
+        "dm_id": None,
         "status": "pending",
     }
     data["announce"][uid] = info
+
     message = await channel.send(view=build_winner_layout(gid, uid, info, "pending"))
     info["message_id"] = message.id
+    info["jump_url"] = message.jump_url
+
+    if user is not None:
+        try:
+            dm = await user.send(view=build_dm_layout(uid, info, "pending"))
+            info["dm_id"] = dm.id
+        except discord.HTTPException:
+            pass
+
     asyncio.create_task(_reclaim_watch(gid, uid, info["deadline"]))
 
 
@@ -1297,13 +1362,13 @@ async def giveaway_end(interaction: discord.Interaction, message_id: str):
     gid = _parse_message_id(message_id)
     data = giveaways.get(gid) if gid else None
     if not data:
-        return await interaction.response.send_message(error_notice("No giveaway found with that ID."), ephemeral=True)
+        return await interaction.response.send_message(embed=error_notice("No giveaway found with that ID."), ephemeral=True)
     if data["ended"]:
         return await interaction.response.send_message(
-            error_notice("This giveaway has already ended. Use `/giveaway reroll` instead."), ephemeral=True
+            embed=error_notice("This giveaway has already ended. Use `/giveaway reroll` instead."), ephemeral=True
         )
 
-    await interaction.response.send_message(notice("Ending giveaway…"), ephemeral=True)
+    await interaction.response.send_message(embed=notice("Ending giveaway…"), ephemeral=True)
     await _finish_giveaway(gid)
 
 
@@ -1313,12 +1378,12 @@ async def giveaway_end(interaction: discord.Interaction, message_id: str):
 async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
     gid = _parse_message_id(message_id)
     if gid is None:
-        return await interaction.response.send_message(error_notice("Invalid message ID."), ephemeral=True)
+        return await interaction.response.send_message(embed=error_notice("Invalid message ID."), ephemeral=True)
 
     error = await _reroll(gid)
     if error:
-        return await interaction.response.send_message(error_notice(error), ephemeral=True)
-    await interaction.response.send_message(notice("✅ New winner selected."), ephemeral=True)
+        return await interaction.response.send_message(embed=error_notice(error), ephemeral=True)
+    await interaction.response.send_message(embed=notice("✅ New winner selected."), ephemeral=True)
 
 
 def parse_giveaway_args(args: str) -> tuple[str, str, int, str] | None:
