@@ -2,7 +2,7 @@
 SynexProtectBot - Discord utility & moderation helper bot.
 
 Requirements:
-    pip install -U discord.py python-dotenv deep-translator
+    pip install -U "discord.py>=2.6" python-dotenv deep-translator
 
 Create a .env file next to this script:
     DISCORD_TOKEN=your_bot_token_here
@@ -33,15 +33,15 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.3.0"
+BOT_VERSION = "1.4.0"
 
 # Palette: black / charcoal / slate / steel / silver
-INK = 0x0B0C0E          # near black
+INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
 SLATE = 0x2A2E35
 STEEL = 0x4A505A
 SILVER = 0x9AA1AC
-ERROR = 0x4B1D1D        # muted dark red, only for errors
+ERROR = 0x4B1D1D
 
 START_TIME = datetime.now(timezone.utc)
 
@@ -53,7 +53,6 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None, case_
 
 giveaways: dict[int, dict] = {}
 
-# Reaction roles: {guild_id: [{"emoji": key, "role_id": int, "message_id": int | None}, ...]}
 REACTION_ROLES_FILE = Path(__file__).with_name("reaction_roles.json")
 reaction_roles: dict[str, list[dict]] = {}
 
@@ -63,6 +62,28 @@ DURATION_RE = re.compile(r"(\d+)\s*([smhdw])", re.IGNORECASE)
 DURATION_TOKEN_RE = re.compile(r"(?:\d+[smhdw])+", re.IGNORECASE)
 UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 LETTERS = ["🇦", "🇧", "🇨", "🇩", "🇪"]
+GIFT_EMOJI = "<:gift:1567900881809186889>"
+
+COLOR_NAMES = {
+    "Black": 0x0B0C0E,
+    "Charcoal": 0x1A1C20,
+    "Gray": 0x4A505A,
+    "Silver": 0x9AA1AC,
+    "White": 0xF2F3F5,
+    "Blue": 0x3B82F6,
+    "Navy": 0x1E3A8A,
+    "Sky": 0x38BDF8,
+    "Teal": 0x14B8A6,
+    "Green": 0x22C55E,
+    "Yellow": 0xFACC15,
+    "Orange": 0xF97316,
+    "Red": 0xEF4444,
+    "Crimson": 0x9F1239,
+    "Pink": 0xEC4899,
+    "Purple": 0xA855F7,
+    "Violet": 0x7C3AED,
+    "Brown": 0x78350F,
+}
 
 
 # ---------------------------------------------------------------- helpers
@@ -76,7 +97,6 @@ def base_embed(title: str | None = None, description: str | None = None, color: 
 
 
 def notice(text: str, color: int = CHARCOAL) -> discord.Embed:
-    """Short, untitled embed used for confirmations and small messages."""
     return discord.Embed(description=text, color=color)
 
 
@@ -101,36 +121,13 @@ def emoji_key_from_partial(emoji: discord.PartialEmoji) -> str:
 
 
 def emoji_key_from_input(text: str) -> str | None:
-    """Turns '<:name:123>' into a custom key, or a unicode emoji into itself."""
     text = text.strip()
     match = EMOJI_MARKUP_RE.fullmatch(text)
     if match:
         return f"c{match.group(3)}"
     if text and not re.search(r"[A-Za-z0-9]", text):
-        return text  # unicode emoji have no letters/digits
+        return text
     return None
-
-
-COLOR_NAMES = {
-    "Black": 0x0B0C0E,
-    "Charcoal": 0x1A1C20,
-    "Gray": 0x4A505A,
-    "Silver": 0x9AA1AC,
-    "White": 0xF2F3F5,
-    "Blue": 0x3B82F6,
-    "Navy": 0x1E3A8A,
-    "Sky": 0x38BDF8,
-    "Teal": 0x14B8A6,
-    "Green": 0x22C55E,
-    "Yellow": 0xFACC15,
-    "Orange": 0xF97316,
-    "Red": 0xEF4444,
-    "Crimson": 0x9F1239,
-    "Pink": 0xEC4899,
-    "Purple": 0xA855F7,
-    "Violet": 0x7C3AED,
-    "Brown": 0x78350F,
-}
 
 
 def parse_color(value: str | None) -> int:
@@ -156,7 +153,6 @@ async def color_autocomplete(interaction: discord.Interaction, current: str):
 
 
 def parse_duration(text: str) -> int | None:
-    """Accepts formats like 30s, 10m, 2h, 1d, 1h30m."""
     matches = DURATION_RE.findall(text or "")
     if not matches:
         return None
@@ -174,6 +170,10 @@ def fmt_seconds(seconds: int) -> str:
 def progress_bar(percent: float, size: int = 12) -> str:
     filled = round(percent / 100 * size)
     return "▰" * filled + "▱" * (size - filled)
+
+
+def now_ts() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
 
 
 # ---------------------------------------------------------------- shared builders
@@ -271,7 +271,6 @@ async def on_ready():
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
-    # Silently ignore unknown commands and failed permission checks on prefix commands.
     if isinstance(error, (commands.CommandNotFound, commands.CheckFailure, commands.NoPrivateMessage)):
         return
     print(f"[prefix error] {error}")
@@ -306,7 +305,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         print(f"[reaction roles] could not add role: {exc}")
         return
 
-    # Confirmation only the member sees: a DM, or a self-deleting notice if DMs are closed.
     text = f"✅ Role **{role.name}** granted."
     try:
         await member.send(embed=notice(text))
@@ -375,7 +373,8 @@ async def embed_cmd(
         embed_color = parse_color(color)
     except ValueError:
         return await interaction.response.send_message(
-            embed=error_notice("Invalid color. Use a 6-digit hex value such as `2B2D31`."), ephemeral=True
+            embed=error_notice("Invalid color. Pick a color name or use a 6-digit hex value such as `2B2D31`."),
+            ephemeral=True,
         )
 
     if image and not (image.content_type or "").startswith("image/"):
@@ -392,7 +391,7 @@ async def embed_cmd(
         embed.set_image(url=image_url)
 
     if not (title or description or image or image_url):
-        embed.description = "​"  # Discord requires some content
+        embed.description = "​"
 
     await interaction.channel.send(embed=embed)
     await interaction.response.send_message(notice("✅ Embed sent."), ephemeral=True)
@@ -415,7 +414,6 @@ async def emojisteal(interaction: discord.Interaction, emoji: str, name: str | N
     if match:
         partial = discord.PartialEmoji(animated=bool(match.group(1)), name=match.group(2), id=int(match.group(3)))
     else:
-        # Fall back to an emoji the bot can already see, by name.
         name_match = EMOJI_NAME_RE.fullmatch(emoji.strip())
         if name_match:
             wanted = name_match.group(1).lower()
@@ -483,9 +481,7 @@ async def addemojirole(
 
     key = emoji_key_from_input(emoji)
     if key is None:
-        return await interaction.response.send_message(
-            error_notice("Invalid emoji. Paste the emoji itself."), ephemeral=True
-        )
+        return await interaction.response.send_message(error_notice("Invalid emoji. Paste the emoji itself."), ephemeral=True)
 
     msg_id = None
     if message_id:
@@ -520,7 +516,7 @@ async def ping_prefix(ctx: commands.Context):
     await ctx.send(embed=build_ping_embed())
 
 
-# ---------------------------------------------------------------- /serverinfo  (prefix: !server)
+# ---------------------------------------------------------------- /serverinfo (prefix: !server)
 
 @bot.tree.command(name="serverinfo", description="Show statistics and information about this server.")
 @app_commands.guild_only()
@@ -534,7 +530,7 @@ async def server_prefix(ctx: commands.Context):
     await ctx.send(embed=build_serverinfo_embed(ctx.guild))
 
 
-# ---------------------------------------------------------------- /userinfo  (prefix: !user)
+# ---------------------------------------------------------------- /userinfo (prefix: !user)
 
 @bot.tree.command(name="userinfo", description="Show details about a user.")
 @app_commands.describe(member="The user to inspect (default: you)")
@@ -549,7 +545,7 @@ async def user_prefix(ctx: commands.Context, member: Optional[discord.Member] = 
     await ctx.send(embed=build_userinfo_embed(member or ctx.author))
 
 
-# ---------------------------------------------------------------- /botinfo  (prefix: !botinfo)
+# ---------------------------------------------------------------- /botinfo (prefix: !botinfo)
 
 @bot.tree.command(name="botinfo", description="Show statistics about the bot.")
 async def botinfo(interaction: discord.Interaction):
@@ -561,7 +557,7 @@ async def botinfo_prefix(ctx: commands.Context):
     await ctx.send(embed=build_botinfo_embed())
 
 
-# ---------------------------------------------------------------- /avatar  (prefix: !avatar)
+# ---------------------------------------------------------------- /avatar (prefix: !avatar)
 
 @bot.tree.command(name="avatar", description="Show a user's avatar in full size.")
 @app_commands.describe(member="The user whose avatar to show (default: you)")
@@ -592,7 +588,7 @@ PUBLIC_COMMANDS = [
 
 # (name, description, usage, required permission)
 ADMIN_COMMANDS = [
-    ("poll", "Public poll with live results and up to five options.", "/poll question option1 option2 [option3] [option4] [option5]", "Manage Messages"),
+    ("poll", "Public poll with live vote counts and up to five options.", "/poll question option1 option2 [option3] [option4] [option5]", "Manage Messages"),
     ("bot-say", "Send a message without revealing who sent it.", "/bot-say message [channel]", "Manage Messages"),
     ("embed", "Send a custom embed with color, footer and image.", "/embed [title] [description] [color] [footer] [image] [image_url]", "Manage Messages"),
     ("emojisteal", "Copy a custom emoji from another server into this one.", "/emojisteal emoji [name]", "Manage Expressions"),
@@ -614,16 +610,11 @@ PREFIX_MAP = {
 
 
 class CommandSelect(discord.ui.Select):
-    """Dropdown that shows the usage of a command from a given list."""
-
     def __init__(self, owner_id: int, entries: list[tuple], admin: bool):
         self.owner_id = owner_id
         self.entries = {e[0]: e for e in entries}
         self.admin = admin
-        options = [
-            discord.SelectOption(label=f"/{e[0]}", description=e[1][:100], value=e[0])
-            for e in entries
-        ]
+        options = [discord.SelectOption(label=f"/{e[0]}", description=e[1][:100], value=e[0]) for e in entries]
         super().__init__(placeholder="Choose a command to view its details…", options=options)
 
     async def callback(self, interaction: discord.Interaction):
@@ -667,9 +658,7 @@ def build_helpadmin_embed() -> discord.Embed:
 @bot.tree.command(name="help", description="Show the list of available commands.")
 async def help_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(
-        embed=build_help_embed(),
-        view=CommandView(interaction.user.id, PUBLIC_COMMANDS),
-        ephemeral=True,
+        embed=build_help_embed(), view=CommandView(interaction.user.id, PUBLIC_COMMANDS), ephemeral=True
     )
 
 
@@ -693,10 +682,7 @@ async def helpadmin(interaction: discord.Interaction):
 @commands.guild_only()
 @commands.has_permissions(manage_messages=True)
 async def helpadmin_prefix(ctx: commands.Context):
-    await ctx.send(
-        embed=build_helpadmin_embed(),
-        view=CommandView(ctx.author.id, ADMIN_COMMANDS, admin=True),
-    )
+    await ctx.send(embed=build_helpadmin_embed(), view=CommandView(ctx.author.id, ADMIN_COMMANDS, admin=True))
 
 
 # ---------------------------------------------------------------- /poll (admin, public votes)
@@ -737,7 +723,7 @@ class PollView(discord.ui.View):
         async def callback(interaction: discord.Interaction):
             user_id = interaction.user.id
             if self.user_choice.get(user_id) == index:
-                del self.user_choice[user_id]          # same option again removes the vote
+                del self.user_choice[user_id]
             else:
                 self.user_choice[user_id] = index
             self._refresh_buttons()
@@ -752,8 +738,7 @@ class PollView(discord.ui.View):
             percent = (counts[i] / total * 100) if total else 0
             rows.append(f"{LETTERS[i]}  **{option}**\n{progress_bar(percent)}  `{percent:.0f}%`")
 
-        description = f"### 📊 {self.question}\n\n" + "\n\n".join(rows)
-        embed = discord.Embed(description=description, color=SLATE)
+        embed = discord.Embed(description=f"### 📊 {self.question}\n\n" + "\n\n".join(rows), color=SLATE)
         votes = f"{total} vote{'s' if total != 1 else ''}"
         embed.set_footer(text=f"{votes} · Click an option to vote · Click it again to remove your vote")
         return embed
@@ -785,7 +770,7 @@ async def poll(
     await interaction.response.send_message(embed=view.build_embed(), view=view)
 
 
-# ---------------------------------------------------------------- /remind
+# ---------------------------------------------------------------- /timer (private DM reminder)
 
 async def _send_timer(user: discord.abc.User, text: str, delay: int) -> None:
     await asyncio.sleep(delay)
@@ -826,8 +811,7 @@ async def timer_cmd(interaction: discord.Interaction, time: str, reminder: str):
     seconds = _parse_timer_time(time)
     if seconds is None:
         return await interaction.response.send_message(
-            embed=error_notice("Use a time between 5 seconds and 30 days, e.g. `10m`, `2h`, `1d`."),
-            ephemeral=True,
+            embed=error_notice("Use a time between 5 seconds and 30 days, e.g. `10m`, `2h`, `1d`."), ephemeral=True
         )
     if not await _start_timer(interaction.user, seconds, reminder):
         return await interaction.response.send_message(
@@ -835,8 +819,7 @@ async def timer_cmd(interaction: discord.Interaction, time: str, reminder: str):
             ephemeral=True,
         )
     await interaction.response.send_message(
-        embed=notice(f"✅ Timer set. I'll send you a DM in **{fmt_seconds(seconds)}**."),
-        ephemeral=True,
+        embed=notice(f"✅ Timer set. I'll send you a DM in **{fmt_seconds(seconds)}**."), ephemeral=True
     )
 
 
@@ -851,23 +834,21 @@ async def timer_prefix(ctx: commands.Context, *, args: str = ""):
     if seconds is None:
         return await ctx.send(error_notice("Use a time between 5 seconds and 30 days, e.g. `10m`, `2h`, `1d`."))
 
-    # Remove the command message so the reminder text isn't left in the channel.
     try:
         await ctx.message.delete()
     except discord.HTTPException:
         pass
 
     if not await _start_timer(ctx.author, seconds, parts[1]):
-        await ctx.author.send(embed=error_notice("I couldn't send you a DM. Enable direct messages from server members and try again."))
+        await ctx.author.send(
+            embed=error_notice("I couldn't send you a DM. Enable direct messages from server members and try again.")
+        )
 
 
 # ---------------------------------------------------------------- /translate
 
 @bot.tree.command(name="translate", description="Translate a text into another language.")
-@app_commands.describe(
-    language="Target language code, e.g. en, es, fr, ja, de",
-    text="The text to translate",
-)
+@app_commands.describe(language="Target language code, e.g. en, es, fr, ja, de", text="The text to translate")
 async def translate(interaction: discord.Interaction, language: str, text: str):
     await interaction.response.defer(ephemeral=True)
     try:
@@ -876,8 +857,7 @@ async def translate(interaction: discord.Interaction, language: str, text: str):
         )
     except Exception:
         return await interaction.followup.send(
-            embed=error_notice("Could not translate. Check the language code (e.g. `en`, `es`)."),
-            ephemeral=True,
+            embed=error_notice("Could not translate. Check the language code (e.g. `en`, `es`)."), ephemeral=True
         )
 
     embed = base_embed("🌐 Translation", color=CHARCOAL)
@@ -886,101 +866,179 @@ async def translate(interaction: discord.Interaction, language: str, text: str):
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-# ---------------------------------------------------------------- /addemojirole is defined above
-
 # ---------------------------------------------------------------- giveaways (admin)
+# Built with Components V2 (LayoutView) so the divider and buttons sit inside one container.
 
-GIFT_EMOJI = "<:gift:1567900881809186889>"
+JOIN_BUTTON_ID = "giveaway:join"
+ENTRIES_BUTTON_ID = "giveaway:entries"
 
 
-def build_giveaway_embed(data: dict) -> discord.Embed:
-    winners = data["last_winners"]
-    winner_line = " ".join(f"<@{w}>" for w in winners) if winners else "No valid entries"
+def _giveaway_text(data: dict) -> tuple[str, str]:
     header = f"### {GIFT_EMOJI} {data['prize']}"
-    remaining = max(0, data["ends_at"] - int(datetime.now(timezone.utc).timestamp()))
-    footer = f"-# Ends in {fmt_seconds(remaining)} • <t:{data['ends_at']}:f>"
-
     if data["ended"]:
-        description = (
-            f"{header}\n"
-            f"-# Ended <t:{data['ends_at']}:R> • <t:{data['ends_at']}:f>\n"
+        footer = f"-# Ended <t:{data['ends_at']}:R> • <t:{data['ends_at']}:f>"
+    else:
+        remaining = max(0, data["ends_at"] - now_ts())
+        footer = f"-# Ends in {fmt_seconds(remaining)} • <t:{data['ends_at']}:f>"
+    body = (
+        f"Hosted by: <@{data['host_id']}>\n"
+        f"Entries: {len(data['entries']):,}\n"
+        f"Winners: {data['winners']}"
+    )
+    if data["ended"]:
+        winners = data["last_winners"]
+        winner_line = " ".join(f"<@{w}>" for w in winners) if winners else "No valid entries"
+        body = (
             f"Hosted by: <@{data['host_id']}>\n"
-            f"Entries: {len(data['entries'])}\n"
+            f"Entries: {len(data['entries']):,}\n"
             f"Winners: {winner_line}"
         )
+    return f"{header}\n{footer}", body
+
+
+def build_giveaway_layout(data: dict) -> discord.ui.LayoutView:
+    top, body = _giveaway_text(data)
+
+    join = discord.ui.Button(
+        label="Giveaway ended" if data["ended"] else "Join Giveaway",
+        emoji=None if data["ended"] else "🎟️",
+        style=discord.ButtonStyle.secondary if data["ended"] else discord.ButtonStyle.primary,
+        custom_id=JOIN_BUTTON_ID,
+        disabled=data["ended"],
+    )
+    join.callback = _join_callback
+
+    entries = discord.ui.Button(
+        label=f"Entries: {len(data['entries']):,}",
+        style=discord.ButtonStyle.secondary,
+        custom_id=ENTRIES_BUTTON_ID,
+    )
+    entries.callback = _entries_callback
+
+    row = discord.ui.ActionRow()
+    row.add_item(join)
+    row.add_item(entries)
+
+    container = discord.ui.Container(
+        discord.ui.TextDisplay(top),
+        discord.ui.Separator(visible=True),
+        discord.ui.TextDisplay(body),
+        discord.ui.Separator(visible=True),
+        row,
+        accent_colour=INK,
+    )
+    layout = discord.ui.LayoutView(timeout=None)
+    layout.add_item(container)
+    return layout
+
+
+async def _join_callback(interaction: discord.Interaction):
+    data = giveaways.get(interaction.message.id)
+    if not data or data["ended"]:
+        return await interaction.response.send_message(notice("This giveaway has ended."), ephemeral=True)
+
+    uid = interaction.user.id
+    if uid in data["entries"]:
+        data["entries"].discard(uid)
+        msg = "You left the giveaway."
     else:
-        description = (
-            f"{header}\n"
-            f"{footer}\n"
-            f"Hosted by: <@{data['host_id']}>\n"
-            f"Entries: {len(data['entries'])}\n"
-            f"Winners: {data['winners']}"
-        )
-    return discord.Embed(description=description, color=INK)
+        data["entries"].add(uid)
+        msg = "✅ You're entered!"
+
+    await interaction.response.edit_message(view=build_giveaway_layout(data))
+    await interaction.followup.send(notice(msg), ephemeral=True)
 
 
-ENTRIES_BUTTON_ID = "giveaway:entries"
-JOIN_BUTTON_ID = "giveaway:join"
+async def _entries_callback(interaction: discord.Interaction):
+    data = giveaways.get(interaction.message.id)
+    if not data:
+        return await interaction.response.send_message(notice("This giveaway no longer exists."), ephemeral=True)
+
+    entrants = list(data["entries"])
+    count = len(entrants)
+    shown = " ".join(f"<@{uid}>" for uid in entrants[:50])
+    if count > 50:
+        shown += f"\n… and {count - 50:,} more"
+    body = shown if shown else "Nobody has entered yet."
+
+    embed = discord.Embed(
+        title="👥  Giveaway entries",
+        description=f"**{count:,}** member{'s' if count != 1 else ''} entered **{data['prize']}**.\n\n{body}",
+        color=SLATE,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-class GiveawayView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.gid: int | None = None
+def _new_giveaway_data(host_id: int, channel_id: int, prize: str, seconds: int, winners: int) -> dict:
+    return {
+        "prize": prize,
+        "winners": winners,
+        "entries": set(),
+        "ended": False,
+        "last_winners": [],
+        "host_id": host_id,
+        "channel_id": channel_id,
+        "ends_at": now_ts() + seconds,
+        "seconds": seconds,
+    }
 
-    def _sync_labels(self, data: dict) -> None:
-        for item in self.children:
-            if item.custom_id == ENTRIES_BUTTON_ID:
-                item.label = f"Entries: {len(data['entries']):,}"
 
-    @discord.ui.button(label="Join Giveaway", emoji="🎟️", style=discord.ButtonStyle.primary, custom_id=JOIN_BUTTON_ID)
-    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = giveaways.get(self.gid)
+async def _refresh_giveaway_message(gid: int) -> None:
+    data = giveaways.get(gid)
+    if not data or data["ended"]:
+        return
+    channel = bot.get_channel(data["channel_id"])
+    if channel is None:
+        return
+    try:
+        message = await channel.fetch_message(gid)
+        await message.edit(view=build_giveaway_layout(data))
+    except discord.HTTPException:
+        pass
+
+
+async def _ticker(gid: int) -> None:
+    """Refreshes the countdown every minute until the giveaway ends."""
+    while True:
+        data = giveaways.get(gid)
         if not data or data["ended"]:
-            return await interaction.response.send_message(notice("This giveaway has ended."), ephemeral=True)
-
-        uid = interaction.user.id
-        if uid in data["entries"]:
-            data["entries"].discard(uid)
-            msg = "You left the giveaway."
-        else:
-            data["entries"].add(uid)
-            msg = "✅ You're entered!"
-
-        self._sync_labels(data)
-        await interaction.response.edit_message(embed=build_giveaway_embed(data), view=self)
-        await interaction.followup.send(notice(msg), ephemeral=True)
-
-    @discord.ui.button(label="Entries: 0", style=discord.ButtonStyle.secondary, custom_id=ENTRIES_BUTTON_ID)
-    async def show_entries(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = giveaways.get(self.gid)
-        if not data:
-            return await interaction.response.send_message(notice("This giveaway no longer exists."), ephemeral=True)
-
-        entrants = list(data["entries"])
-        count = len(entrants)
-        shown = " ".join(f"<@{uid}>" for uid in entrants[:50])
-        if count > 50:
-            shown += f"\n… and {count - 50:,} more"
-        body = shown if shown else "Nobody has entered yet."
-
-        embed = discord.Embed(
-            title="👥  Giveaway entries",
-            description=f"**{count:,}** member{'s' if count != 1 else ''} entered **{data['prize']}**.\n\n{body}",
-            color=SLATE,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        remaining = data["ends_at"] - now_ts()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(60, remaining))
+        await _refresh_giveaway_message(gid)
 
 
-def _ended_view(data: dict) -> discord.ui.View:
-    view = GiveawayView()
-    for item in view.children:
-        if item.custom_id == JOIN_BUTTON_ID:
-            item.disabled = True
-            item.label = "Giveaway ended"
-            item.style = discord.ButtonStyle.secondary
-    view._sync_labels(data)
-    return view
+async def _auto_end(gid: int, delay: int):
+    await asyncio.sleep(delay)
+    data = giveaways.get(gid)
+    if data and not data["ended"]:
+        await _finish_giveaway(gid)
+
+
+def _register_giveaway(message: discord.Message, data: dict) -> None:
+    giveaways[message.id] = data
+    asyncio.create_task(_auto_end(message.id, data["seconds"]))
+    asyncio.create_task(_ticker(message.id))
+
+
+async def _notify_winner(user_id: int, guild: discord.Guild | None, prize: str, host_id: int) -> None:
+    user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+    guild_name = guild.name if guild else "the server"
+    embed = discord.Embed(
+        title="🏆  You won a giveaway!",
+        description=(
+            f"Congratulations! You won **{prize}** in **{guild_name}**.\n\n"
+            f"Please claim it quickly: message <@{host_id}> in the server within **24 hours**, "
+            f"or the prize will be rerolled to another entrant."
+        ),
+        color=INK,
+    )
+    try:
+        await user.send(embed=embed)
+    except discord.HTTPException:
+        pass
 
 
 async def _finish_giveaway(gid: int, pick: int | None = None, exclude: set[int] | None = None) -> list[int] | None:
@@ -999,7 +1057,7 @@ async def _finish_giveaway(gid: int, pick: int | None = None, exclude: set[int] 
     if channel:
         try:
             message = await channel.fetch_message(gid)
-            await message.edit(embed=build_giveaway_embed(data), view=_ended_view(data))
+            await message.edit(view=build_giveaway_layout(data))
         except discord.HTTPException:
             pass
 
@@ -1007,77 +1065,18 @@ async def _finish_giveaway(gid: int, pick: int | None = None, exclude: set[int] 
             mentions = " ".join(f"<@{w}>" for w in winners)
             await channel.send(
                 content=mentions,
-                embed=base_embed(
-                    "🏆  Winner" + ("s" if len(winners) > 1 else ""),
-                    f"Congratulations {mentions}! You won **{data['prize']}**.",
-                    SLATE,
+                embed=discord.Embed(
+                    title="🏆  Winner" + ("s" if len(winners) > 1 else ""),
+                    description=f"Congratulations {mentions}! You won **{data['prize']}**.",
+                    color=SLATE,
                 ),
             )
+            guild = channel.guild
+            for winner in winners:
+                asyncio.create_task(_notify_winner(winner, guild, data["prize"], data["host_id"]))
         else:
-            await channel.send(embed=base_embed("🎉  Giveaway ended", "No valid entries were found.", STEEL))
+            await channel.send(embed=discord.Embed(title="🎉  Giveaway ended", description="No valid entries were found.", color=STEEL))
     return winners
-
-
-async def _auto_end(gid: int, delay: int):
-    await asyncio.sleep(delay)
-    data = giveaways.get(gid)
-    if data and not data["ended"]:
-        await _finish_giveaway(gid)
-
-
-def _new_giveaway_data(host_id: int, channel_id: int, prize: str, seconds: int, winners: int) -> dict:
-    return {
-        "prize": prize,
-        "winners": winners,
-        "entries": set(),
-        "ended": False,
-        "last_winners": [],
-        "host_id": host_id,
-        "channel_id": channel_id,
-        "ends_at": int(datetime.now(timezone.utc).timestamp()) + seconds,
-        "seconds": seconds,
-    }
-
-
-async def _refresh_giveaway_message(gid: int) -> None:
-    data = giveaways.get(gid)
-    if not data or data["ended"]:
-        return
-    channel = bot.get_channel(data["channel_id"])
-    if channel is None:
-        return
-    try:
-        message = await channel.fetch_message(gid)
-        await message.edit(embed=build_giveaway_embed(data))
-    except discord.HTTPException:
-        pass
-
-
-async def _ticker(gid: int) -> None:
-    """Refreshes the countdown in the giveaway message every minute until it ends."""
-    while True:
-        data = giveaways.get(gid)
-        if not data or data["ended"]:
-            return
-        remaining = data["ends_at"] - int(datetime.now(timezone.utc).timestamp())
-        if remaining <= 0:
-            return
-        await asyncio.sleep(min(60, remaining))
-        await _refresh_giveaway_message(gid)
-
-
-def _register_giveaway(message: discord.Message, view: GiveawayView, data: dict) -> None:
-    view.gid = message.id
-    giveaways[message.id] = data
-    asyncio.create_task(_auto_end(message.id, data["seconds"]))
-    asyncio.create_task(_ticker(message.id))
-
-
-def _parse_message_id(value: str) -> int | None:
-    try:
-        return int(value.strip())
-    except ValueError:
-        return None
 
 
 giveaway_group = app_commands.Group(
@@ -1105,15 +1104,13 @@ async def giveaway_create(
     seconds = parse_duration(duration)
     if seconds is None or seconds < 10 or seconds > 30 * 86400:
         return await interaction.response.send_message(
-            embed=error_notice("Use a duration between 10 seconds and 30 days, e.g. `1h` or `2d`."),
-            ephemeral=True,
+            embed=error_notice("Use a duration between 10 seconds and 30 days, e.g. `1h` or `2d`."), ephemeral=True
         )
 
     data = _new_giveaway_data(interaction.user.id, interaction.channel_id, prize, seconds, winners)
-    view = GiveawayView()
-    await interaction.response.send_message(embed=build_giveaway_embed(data), view=view)
+    await interaction.response.send_message(view=build_giveaway_layout(data))
     message = await interaction.original_response()
-    _register_giveaway(message, view, data)
+    _register_giveaway(message, data)
 
 
 @giveaway_group.command(name="end", description="End a giveaway early and pick the winner(s).")
@@ -1147,6 +1144,13 @@ async def _reroll(gid: int) -> tuple[str | None, list[int] | None]:
     return None, new_winners
 
 
+def _parse_message_id(value: str) -> int | None:
+    try:
+        return int(value.strip())
+    except ValueError:
+        return None
+
+
 @giveaway_group.command(name="reroll", description="Pick a new winner for an ended giveaway.")
 @app_commands.describe(message_id="ID of the giveaway message")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -1162,7 +1166,6 @@ async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
 
 
 def parse_giveaway_args(args: str) -> tuple[str, str, int] | None:
-    """Parses '<prize words> <duration> [winners]' from the end of the text."""
     tokens = args.split()
     winners = 1
     if tokens and tokens[-1].isdigit():
@@ -1194,9 +1197,8 @@ async def giveway_prefix(ctx: commands.Context, *, args: str = ""):
         return await ctx.send(error_notice("Winners must be between 1 and 20."))
 
     data = _new_giveaway_data(ctx.author.id, ctx.channel.id, prize, seconds, winners)
-    view = GiveawayView()
-    message = await ctx.send(embed=build_giveaway_embed(data), view=view)
-    _register_giveaway(message, view, data)
+    message = await ctx.send(view=build_giveaway_layout(data))
+    _register_giveaway(message, data)
 
 
 @bot.command(name="reroll")
