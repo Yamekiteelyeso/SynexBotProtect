@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.8.1"
+BOT_VERSION = "1.8.2"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -277,6 +277,10 @@ def build_avatar(user: discord.abc.User) -> tuple[discord.Embed, discord.ui.View
 async def on_ready():
     load_reaction_roles()
     load_tickets()
+    bot.add_view(build_panel_view())
+    for ticket in ticket_data["open"].values():
+        if ticket.get("message_id"):
+            bot.add_view(build_ticket_controls(ticket, ticket.get("welcome", "")), message_id=ticket["message_id"])
     if not getattr(bot, "_tickets_loop_started", False):
         bot._tickets_loop_started = True
         asyncio.create_task(_inactivity_loop())
@@ -1644,19 +1648,23 @@ async def post_panel(channel: discord.abc.Messageable, guild: discord.Guild) -> 
 
 # ---------------------------------------------------------------- ticket controls
 
-def build_ticket_controls(ticket: dict) -> discord.ui.View:
+def build_ticket_controls(ticket: dict, body: str = "", avatar_url: str | None = None) -> discord.ui.LayoutView:
+    """Welcome card for a ticket: text + buttons + staff menu, all inside one gray container."""
     links_on = ticket.get("links_allowed", True)
-    view = discord.ui.View(timeout=None)
-    view.add_item(discord.ui.Button(label="Close Ticket", emoji=E("Error", "🔒"),
-                                    style=discord.ButtonStyle.danger, custom_id="tk:close", row=0))
-    view.add_item(discord.ui.Button(label="Reclaim Ticket", emoji=E("community", "🙋"),
-                                    style=discord.ButtonStyle.primary, custom_id="tk:claim", row=0))
-    view.add_item(discord.ui.Select(
+    text = discord.ui.TextDisplay(body or "**Ticket**")
+    head = (discord.ui.Section(text, accessory=discord.ui.Thumbnail(avatar_url))
+            if avatar_url else text)
+    row_buttons = discord.ui.ActionRow(
+        discord.ui.Button(label="Close Ticket", emoji=E("Error", "🔒"),
+                          style=discord.ButtonStyle.danger, custom_id="tk:close"),
+        discord.ui.Button(label="Reclaim Ticket", emoji=E("community", "🙋"),
+                          style=discord.ButtonStyle.primary, custom_id="tk:claim"),
+    )
+    staff_menu = discord.ui.Select(
         custom_id="tk:staff",
         placeholder="Staff tools…",
         min_values=1,
         max_values=1,
-        row=1,
         options=[
             discord.SelectOption(label="Transfer to other staff", value="transfer",
                                  emoji=E("transfer", "🔁"), description="Hand this ticket to another staff member"),
@@ -1670,7 +1678,16 @@ def build_ticket_controls(ticket: dict) -> discord.ui.View:
             discord.SelectOption(label="Take out user", value="removeuser",
                                  emoji=E("false", "➖"), description="Remove a member from this ticket"),
         ],
-    ))
+    )
+    container = discord.ui.Container(
+        head,
+        discord.ui.Separator(),
+        row_buttons,
+        discord.ui.ActionRow(staff_menu),
+        accent_colour=STEEL,
+    )
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
     return view
 
 
@@ -1744,21 +1761,20 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
         intro=ttype["intro"],
         opened=discord.utils.format_dt(discord.utils.utcnow(), "f"),
     )
-    welcome = discord.Embed(
-        title=fill(WELCOME_TITLE, **values),
-        description=fill(WELCOME_BODY, **values),
-        color=WELCOME_COLOR,
-        timestamp=discord.utils.utcnow(),
+    body = (
+        f"{fill(WELCOME_PING, **values).strip()}\n"
+        f"### {fill(WELCOME_TITLE, **values)}\n"
+        f"{fill(WELCOME_BODY, **values)}\n"
+        f"-# {WELCOME_FOOTER}"
     )
-    welcome.set_thumbnail(url=interaction.user.display_avatar.url)
-    welcome.set_footer(text=WELCOME_FOOTER)
-
-    await channel.send(
-        content=fill(WELCOME_PING, **values).strip() or None,
-        embed=welcome,
-        view=build_ticket_controls(ticket),
+    ticket["welcome"] = body
+    layout = build_ticket_controls(ticket, body, interaction.user.display_avatar.url)
+    msg = await channel.send(
+        view=layout,
         allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False),
     )
+    ticket["message_id"] = msg.id
+    save_tickets()
 
     log = base_embed(f"{E('community', '🎫')} Ticket opened", color=STEEL)
     log.add_field(name="Channel", value=channel.mention, inline=True)
@@ -1948,7 +1964,7 @@ async def _toggle_links(interaction: discord.Interaction) -> None:
         return await interaction.response.send_message(embed=err, ephemeral=True)
     ticket["links_allowed"] = not ticket.get("links_allowed", True)
     save_tickets()
-    await interaction.response.edit_message(view=build_ticket_controls(ticket))
+    await interaction.response.edit_message(view=build_ticket_controls(ticket, ticket.get("welcome", "")))
 
 
 class RenameModal(discord.ui.Modal, title="Rename channel"):
