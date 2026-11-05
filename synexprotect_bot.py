@@ -270,6 +270,11 @@ async def on_ready():
     if not getattr(bot, "_tickets_loop_started", False):
         bot._tickets_loop_started = True
         asyncio.create_task(_inactivity_loop())
+    # Global commands can take up to an hour to show. Syncing per guild makes them appear now.
+    for guild in bot.guilds:
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"[sync] {guild.name}: {len(synced)} commands")
     await bot.tree.sync()
     print(f"{BOT_NAME} online as {bot.user} ({len(bot.guilds)} servers)")
 
@@ -903,8 +908,7 @@ def _giveaway_top_and_body(data: dict) -> tuple[str, str]:
         footer = f"-# Ended <t:{data['ends_at']}:R> • <t:{data['ends_at']}:f>"
         winners_value = " ".join(f"<@{w}>" for w in data["winners_list"]) or "No valid entries"
     else:
-        remaining = max(0, data["ends_at"] - now_ts())
-        footer = f"-# Ends in {fmt_seconds(remaining)} • <t:{data['ends_at']}:f>"
+        footer = f"-# Ends <t:{data['ends_at']}:R> • <t:{data['ends_at']}:f>"
         winners_value = str(data["winners"])
 
     top = f"### {GIFT_EMOJI} `|` {data['prize']}\n{footer}"
@@ -951,40 +955,21 @@ def build_giveaway_layout(data: dict) -> discord.ui.LayoutView:
     return layout
 
 
-class LeaveGiveawayView(discord.ui.View):
-    """Private view shown to a member after they enter: red button to leave."""
-
-    def __init__(self, gid: int):
-        super().__init__(timeout=180)
-        self.gid = gid
-        leave = discord.ui.Button(
-            label="Leave Giveaway",
-            emoji="<:warn3:1542357062443597967>",
-            style=discord.ButtonStyle.danger,
-        )
-        leave.callback = self._leave
-        self.add_item(leave)
-
-    async def _leave(self, interaction: discord.Interaction):
-        data = giveaways.get(self.gid)
-        if data:
-            data["entries"].discard(interaction.user.id)
-            await _refresh_giveaway_message(self.gid)
-        await interaction.response.edit_message(embed=notice("You left the giveaway."), view=None)
-
-
 async def _join_callback(interaction: discord.Interaction):
     data = giveaways.get(interaction.message.id)
     if not data or data["ended"]:
         return await interaction.response.send_message(embed=notice("This giveaway has ended."), ephemeral=True)
 
-    data["entries"].add(interaction.user.id)
+    uid = interaction.user.id
+    if uid in data["entries"]:
+        data["entries"].discard(uid)
+        msg = "You left the giveaway."
+    else:
+        data["entries"].add(uid)
+        msg = "✅ You're entered! Press the button again to leave."
+
     await interaction.response.edit_message(view=build_giveaway_layout(data))
-    await interaction.followup.send(
-        embed=notice("✅ You're entered!"),
-        view=LeaveGiveawayView(interaction.message.id),
-        ephemeral=True,
-    )
+    await interaction.followup.send(embed=notice(msg), ephemeral=True)
 
 
 async def _entries_callback(interaction: discord.Interaction):
@@ -1062,7 +1047,6 @@ def _register_giveaway(message: discord.Message, data: dict) -> None:
     data["message_id"] = message.id
     giveaways[message.id] = data
     asyncio.create_task(_auto_end(message.id, data["seconds"]))
-    asyncio.create_task(_ticker(message.id))
 
 
 async def _resolve_user(uid: int) -> discord.User | None:
@@ -1073,6 +1057,12 @@ async def _resolve_user(uid: int) -> discord.User | None:
         except discord.HTTPException:
             return None
     return user
+
+
+def emoji_from_bot(name: str, fallback: str) -> str:
+    """Discord only renders an emoji for the bot if the bot is in the server that owns it."""
+    found = next((e for e in bot.emojis if e.name == name), None)
+    return str(found) if found else fallback
 
 
 def build_dm_layout(uid: int, info: dict, state: str) -> discord.ui.LayoutView:
@@ -1097,7 +1087,7 @@ def build_dm_layout(uid: int, info: dict, state: str) -> discord.ui.LayoutView:
     row.add_item(link)
 
     container = discord.ui.Container(
-        discord.ui.TextDisplay(f"### {WON_EMOJI} You won a Giveaway!"),
+        discord.ui.TextDisplay("### 🎉 You won a Giveaway!"),
         discord.ui.Separator(visible=True),
         discord.ui.TextDisplay("Claim your reward by pressing the button below"),
         discord.ui.TextDisplay(footer),
