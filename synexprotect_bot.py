@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.8.2"
+BOT_VERSION = "1.8.3"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -277,10 +277,11 @@ def build_avatar(user: discord.abc.User) -> tuple[discord.Embed, discord.ui.View
 async def on_ready():
     load_reaction_roles()
     load_tickets()
+    await _sync_tickets_from_discord()
     bot.add_view(build_panel_view())
     for ticket in ticket_data["open"].values():
         if ticket.get("message_id"):
-            bot.add_view(build_ticket_controls(ticket, ticket.get("welcome", "")), message_id=ticket["message_id"])
+            bot.add_view(ticket_layout(ticket), message_id=ticket["message_id"])
     if not getattr(bot, "_tickets_loop_started", False):
         bot._tickets_loop_started = True
         asyncio.create_task(_inactivity_loop())
@@ -1549,7 +1550,7 @@ WELCOME_BODY = (
     "> **Ticket** · #{number}\n"
     "> **Opened** · {opened}"
 )
-WELCOME_FOOTER = "Staff tools are below · Only staff can use them"
+WELCOME_FOOTER = "Staff tools are above · Only staff can use them"
 WELCOME_PING = "{user} {roles}"
 
 TICKETS_FILE = Path(__file__).with_name("tickets_data.json")
@@ -1648,18 +1649,17 @@ async def post_panel(channel: discord.abc.Messageable, guild: discord.Guild) -> 
 
 # ---------------------------------------------------------------- ticket controls
 
-def build_ticket_controls(ticket: dict, body: str = "", avatar_url: str | None = None) -> discord.ui.LayoutView:
-    """Welcome card for a ticket: text + buttons + staff menu, all inside one gray container."""
+TICKET_TOPIC_RE = re.compile(r"^ticket\|owner:(\d+)\|n:(\d+)\|type:(\S+)")
+
+
+def build_ticket_controls(ticket: dict, head: str = "", body: str = "", avatar_url: str | None = None) -> discord.ui.LayoutView:
+    """Ticket welcome card: header, divider, details, staff menu on top, then the buttons, all in one gray container."""
     links_on = ticket.get("links_allowed", True)
-    text = discord.ui.TextDisplay(body or "**Ticket**")
-    head = (discord.ui.Section(text, accessory=discord.ui.Thumbnail(avatar_url))
-            if avatar_url else text)
-    row_buttons = discord.ui.ActionRow(
-        discord.ui.Button(label="Close Ticket", emoji=E("Error", "🔒"),
-                          style=discord.ButtonStyle.danger, custom_id="tk:close"),
-        discord.ui.Button(label="Reclaim Ticket", emoji=E("community", "🙋"),
-                          style=discord.ButtonStyle.primary, custom_id="tk:claim"),
-    )
+    head = head or f"### Ticket #{ticket['number']:04d}"
+    body = body or f"Ticket **{ticket['type']}**"
+    head_text = discord.ui.TextDisplay(head)
+    head_block = (discord.ui.Section(head_text, accessory=discord.ui.Thumbnail(avatar_url))
+                  if avatar_url else head_text)
     staff_menu = discord.ui.Select(
         custom_id="tk:staff",
         placeholder="Staff tools…",
@@ -1679,16 +1679,71 @@ def build_ticket_controls(ticket: dict, body: str = "", avatar_url: str | None =
                                  emoji=E("false", "➖"), description="Remove a member from this ticket"),
         ],
     )
+    row_buttons = discord.ui.ActionRow(
+        discord.ui.Button(label="Close Ticket", emoji=E("Error", "🔒"),
+                          style=discord.ButtonStyle.danger, custom_id="tk:close"),
+        discord.ui.Button(label="Reclaim Ticket", emoji=E("community", "🙋"),
+                          style=discord.ButtonStyle.primary, custom_id="tk:claim"),
+    )
     container = discord.ui.Container(
-        head,
+        head_block,
         discord.ui.Separator(),
-        row_buttons,
+        discord.ui.TextDisplay(body),
         discord.ui.ActionRow(staff_menu),
+        row_buttons,
+        discord.ui.TextDisplay("-# Staff tools are above · Only staff can use them"),
         accent_colour=STEEL,
     )
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(container)
     return view
+
+
+def ticket_layout(ticket: dict) -> discord.ui.LayoutView:
+    return build_ticket_controls(ticket, ticket.get("welcome_head", ""), ticket.get("welcome_body", ""), ticket.get("avatar"))
+
+
+async def _sync_tickets_from_discord() -> None:
+    """Rebuild open tickets from their channels, so limits and buttons survive redeploys."""
+    found: set[str] = set()
+    for guild in bot.guilds:
+        for channel in guild.text_channels:
+            m = TICKET_TOPIC_RE.match(channel.topic or "")
+            if not m:
+                continue
+            owner, number, key = int(m[1]), int(m[2]), m[3]
+            cid = str(channel.id)
+            found.add(cid)
+            prev = ticket_data["open"].get(cid, {})
+            ttype = ticket_type(key)
+            ticket = {
+                "user_id": owner,
+                "type": ttype["label"] if ttype else key,
+                "type_key": key,
+                "number": number,
+                "claimed_by": prev.get("claimed_by"),
+                "opened_at": prev.get("opened_at", now_ts()),
+                "last_activity": prev.get("last_activity", now_ts()),
+                "links_allowed": prev.get("links_allowed", True),
+                "welcome_head": prev.get("welcome_head", ""),
+                "welcome_body": prev.get("welcome_body", ""),
+                "avatar": prev.get("avatar"),
+                "message_id": prev.get("message_id"),
+            }
+            if not ticket["message_id"]:
+                try:
+                    async for msg in channel.history(limit=20, oldest_first=True):
+                        if msg.author.id == bot.user.id:
+                            ticket["message_id"] = msg.id
+                            break
+                except discord.HTTPException:
+                    pass
+            ticket_data["open"][cid] = ticket
+            ticket_data["counter"] = max(ticket_data["counter"], number)
+    for cid in list(ticket_data["open"]):
+        if cid not in found:
+            ticket_data["open"].pop(cid)
+    save_tickets()
 
 
 # ---------------------------------------------------------------- opening
@@ -1729,7 +1784,7 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
 
     try:
         channel = await guild.create_text_channel(
-            name, category=category, overwrites=overwrites, reason=f"Ticket opened by {interaction.user}"
+            name, category=category, overwrites=overwrites, topic=f"ticket|owner:{interaction.user.id}|n:{number}|type:{ttype['key']}", reason=f"Ticket opened by {interaction.user}"
         )
     except discord.HTTPException as exc:
         ticket_data["counter"] -= 1
@@ -1761,14 +1816,10 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
         intro=ttype["intro"],
         opened=discord.utils.format_dt(discord.utils.utcnow(), "f"),
     )
-    body = (
-        f"{fill(WELCOME_PING, **values).strip()}\n"
-        f"### {fill(WELCOME_TITLE, **values)}\n"
-        f"{fill(WELCOME_BODY, **values)}\n"
-        f"-# {WELCOME_FOOTER}"
-    )
-    ticket["welcome"] = body
-    layout = build_ticket_controls(ticket, body, interaction.user.display_avatar.url)
+    ticket["welcome_head"] = f"{fill(WELCOME_PING, **values).strip()}\n### {fill(WELCOME_TITLE, **values)}"
+    ticket["welcome_body"] = fill(WELCOME_BODY, **values)
+    ticket["avatar"] = interaction.user.display_avatar.url
+    layout = ticket_layout(ticket)
     msg = await channel.send(
         view=layout,
         allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False),
@@ -1964,7 +2015,7 @@ async def _toggle_links(interaction: discord.Interaction) -> None:
         return await interaction.response.send_message(embed=err, ephemeral=True)
     ticket["links_allowed"] = not ticket.get("links_allowed", True)
     save_tickets()
-    await interaction.response.edit_message(view=build_ticket_controls(ticket, ticket.get("welcome", "")))
+    await interaction.response.edit_message(view=ticket_layout(ticket))
 
 
 class RenameModal(discord.ui.Modal, title="Rename channel"):
