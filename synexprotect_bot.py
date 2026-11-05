@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.8.0"
+BOT_VERSION = "1.8.1"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -1651,17 +1651,26 @@ def build_ticket_controls(ticket: dict) -> discord.ui.View:
                                     style=discord.ButtonStyle.danger, custom_id="tk:close", row=0))
     view.add_item(discord.ui.Button(label="Reclaim Ticket", emoji=E("community", "🙋"),
                                     style=discord.ButtonStyle.primary, custom_id="tk:claim", row=0))
-    view.add_item(discord.ui.Button(label="Transfer to other staff", emoji=E("transfer", "🔁"),
-                                    style=discord.ButtonStyle.secondary, custom_id="tk:transfer", row=1))
-    view.add_item(discord.ui.Button(label=f"Accept links: {'On' if links_on else 'Off'}",
-                                    emoji=E(["link~2", "link_2", "link2", "link"], "🔗"),
-                                    style=discord.ButtonStyle.secondary, custom_id="tk:links", row=1))
-    view.add_item(discord.ui.Button(label="Rename channel", emoji=E("support", "✏️"),
-                                    style=discord.ButtonStyle.secondary, custom_id="tk:rename", row=1))
-    view.add_item(discord.ui.Button(label="Add user", emoji=E("true", "➕"),
-                                    style=discord.ButtonStyle.success, custom_id="tk:adduser", row=1))
-    view.add_item(discord.ui.Button(label="Take out user", emoji=E("false", "➖"),
-                                    style=discord.ButtonStyle.danger, custom_id="tk:removeuser", row=1))
+    view.add_item(discord.ui.Select(
+        custom_id="tk:staff",
+        placeholder="Staff tools…",
+        min_values=1,
+        max_values=1,
+        row=1,
+        options=[
+            discord.SelectOption(label="Transfer to other staff", value="transfer",
+                                 emoji=E("transfer", "🔁"), description="Hand this ticket to another staff member"),
+            discord.SelectOption(label=f"Accept links: {'On' if links_on else 'Off'}", value="links",
+                                 emoji=E(["link~2", "link_2", "link2", "link"], "🔗"),
+                                 description="Turn link filtering on or off for this ticket"),
+            discord.SelectOption(label="Rename channel", value="rename",
+                                 emoji=E("support", "✏️"), description="Change the ticket channel name"),
+            discord.SelectOption(label="Add user", value="adduser",
+                                 emoji=E("true", "➕"), description="Give a member access to this ticket"),
+            discord.SelectOption(label="Take out user", value="removeuser",
+                                 emoji=E("false", "➖"), description="Remove a member from this ticket"),
+        ],
+    ))
     return view
 
 
@@ -1995,16 +2004,18 @@ async def on_interaction(interaction: discord.Interaction):
             await _request_close(interaction)
         elif custom_id == "tk:claim":
             await _claim(interaction)
-        elif custom_id == "tk:transfer":
-            await _transfer(interaction)
-        elif custom_id == "tk:links":
-            await _toggle_links(interaction)
-        elif custom_id == "tk:rename":
-            await _rename(interaction)
-        elif custom_id == "tk:adduser":
-            await _add_or_remove_user(interaction, add=True)
-        elif custom_id == "tk:removeuser":
-            await _add_or_remove_user(interaction, add=False)
+        elif custom_id == "tk:staff":
+            action = interaction.data["values"][0]
+            if action == "transfer":
+                await _transfer(interaction)
+            elif action == "links":
+                await _toggle_links(interaction)
+            elif action == "rename":
+                await _rename(interaction)
+            elif action == "adduser":
+                await _add_or_remove_user(interaction, add=True)
+            elif action == "removeuser":
+                await _add_or_remove_user(interaction, add=False)
     except discord.HTTPException as exc:
         print(f"[tickets] interaction error: {exc}")
 
