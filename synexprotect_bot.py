@@ -9,6 +9,7 @@ Create a .env file next to this script:
 
 Enable these in the Discord Developer Portal -> Bot:
     - SERVER MEMBERS INTENT
+    - MESSAGE CONTENT INTENT  (required for prefix commands like !ping)
 """
 
 import asyncio
@@ -18,6 +19,7 @@ import random
 import re
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -29,7 +31,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.0.0"
+BOT_VERSION = "1.1.0"
 COLOR = 0x2B2D31          # dark gray
 COLOR_SOFT = 0x1E1F22     # near black
 COLOR_TEXT = 0x949BA4     # muted gray
@@ -38,11 +40,14 @@ START_TIME = datetime.now(timezone.utc)
 
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None, case_insensitive=True)
 
-polls_registry: dict = {}      # not used for persistence, kept for clarity
 giveaways: dict[int, dict] = {}
+
+EMOJI_MARKUP_RE = re.compile(r"<(a?):([A-Za-z0-9_]+):(\d+)>")
+EMOJI_NAME_RE = re.compile(r":?([A-Za-z0-9_]{2,32}):?")
 
 
 # ---------------------------------------------------------------- helpers
@@ -87,6 +92,86 @@ def progress_bar(percent: float, size: int = 12) -> str:
     return "▰" * filled + "▱" * (size - filled)
 
 
+# ---------------------------------------------------------------- shared builders
+# These are used by both the slash commands and the prefix commands.
+
+def build_ping_embed() -> discord.Embed:
+    ms = round(bot.latency * 1000)
+    status = "Excellent" if ms < 100 else "Good" if ms < 200 else "Degraded"
+    embed = base_embed("⚡ Pong", color=COLOR)
+    embed.add_field(name="Latency", value=f"`{ms} ms`", inline=True)
+    embed.add_field(name="Status", value=status, inline=True)
+    return embed
+
+
+def build_serverinfo_embed(guild: discord.Guild) -> discord.Embed:
+    roles = [r for r in guild.roles if not r.is_default()]
+    humans = sum(1 for m in guild.members if not m.bot)
+    bots = sum(1 for m in guild.members if m.bot)
+
+    embed = base_embed(guild.name, guild.description or None, COLOR)
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+
+    embed.add_field(name="Owner", value=guild.owner.mention if guild.owner else "Unknown", inline=True)
+    embed.add_field(name="Boost Level", value=f"{guild.premium_tier} · {guild.premium_subscription_count} boosts", inline=True)
+    embed.add_field(name="Verification", value=str(guild.verification_level).title(), inline=True)
+    embed.add_field(name="Members", value=f"{guild.member_count:,} total\n{humans:,} humans · {bots:,} bots", inline=True)
+    embed.add_field(name="Channels", value=f"{len(guild.text_channels)} text · {len(guild.voice_channels)} voice", inline=True)
+    embed.add_field(name="Roles", value=str(len(roles)), inline=True)
+    embed.add_field(
+        name="Created",
+        value=f"{discord.utils.format_dt(guild.created_at, 'D')}\n{discord.utils.format_dt(guild.created_at, 'R')}",
+        inline=False,
+    )
+    embed.add_field(name="Server ID", value=f"`{guild.id}`", inline=False)
+    return embed
+
+
+def build_userinfo_embed(member: discord.Member) -> discord.Embed:
+    roles = [r for r in reversed(member.roles) if not r.is_default()]
+    role_text = " ".join(r.mention for r in roles[:15]) + (f" +{len(roles) - 15} more" if len(roles) > 15 else "")
+
+    embed = base_embed(str(member), color=member.color if member.color.value else COLOR)
+    embed.set_thumbnail(url=member.display_avatar.replace(size=1024).url)
+    embed.add_field(name="Display Name", value=member.display_name, inline=True)
+    embed.add_field(name="User ID", value=f"`{member.id}`", inline=True)
+    embed.add_field(name="Bot", value="Yes" if member.bot else "No", inline=True)
+    embed.add_field(name="Joined Server", value=discord.utils.format_dt(member.joined_at, "D") if member.joined_at else "Unknown", inline=True)
+    embed.add_field(name="Account Created", value=discord.utils.format_dt(member.created_at, "D"), inline=True)
+    embed.add_field(name=f"Roles ({len(roles)})", value=role_text or "None", inline=False)
+    return embed
+
+
+def build_botinfo_embed() -> discord.Embed:
+    uptime = (datetime.now(timezone.utc) - START_TIME).total_seconds()
+    total_users = sum(g.member_count or 0 for g in bot.guilds)
+
+    embed = base_embed(f"🤖 {BOT_NAME}", "Utility and protection bot for your community.", COLOR)
+    embed.set_thumbnail(url=bot.user.display_avatar.url)
+    embed.add_field(name="Uptime", value=fmt_seconds(uptime), inline=True)
+    embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)} ms", inline=True)
+    embed.add_field(name="Version", value=BOT_VERSION, inline=True)
+    embed.add_field(name="Servers", value=f"{len(bot.guilds):,}", inline=True)
+    embed.add_field(name="Users Reached", value=f"{total_users:,}", inline=True)
+    embed.add_field(name="Commands", value=str(len(bot.tree.get_commands())), inline=True)
+    embed.add_field(
+        name="Libraries",
+        value=f"discord.py `{discord.__version__}`\nPython `{platform.python_version()}`",
+        inline=False,
+    )
+    return embed
+
+
+def build_avatar(user: discord.abc.User) -> tuple[discord.Embed, discord.ui.View]:
+    url = user.display_avatar.with_size(4096).url
+    embed = base_embed(f"🖼️ {user.display_name}'s avatar", color=COLOR)
+    embed.set_image(url=url)
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Download", url=url, style=discord.ButtonStyle.link))
+    return embed, view
+
+
 # ---------------------------------------------------------------- events
 
 @bot.event
@@ -112,7 +197,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# ---------------------------------------------------------------- /bot-say
+# ---------------------------------------------------------------- /bot-say (admin)
 
 @bot.tree.command(name="bot-say", description="Send a message through the bot without revealing who sent it.")
 @app_commands.describe(message="The message to send", channel="Channel to send it in (default: this one)")
@@ -127,7 +212,7 @@ async def bot_say(interaction: discord.Interaction, message: str, channel: disco
     )
 
 
-# ---------------------------------------------------------------- /embed
+# ---------------------------------------------------------------- /embed (admin)
 
 @bot.tree.command(name="embed", description="Send a custom embed. Every field is optional.")
 @app_commands.describe(
@@ -172,11 +257,76 @@ async def embed_cmd(
         embed.set_image(url=image_url)
 
     if not (title or description or image or image_url):
-        embed.description = "\u200b"  # Discord requires some content
+        embed.description = "​"  # Discord requires some content
 
     await interaction.channel.send(embed=embed)
     await interaction.response.send_message(
-        embed=base_embed(description="Embed sent.", color=COLOR_SOFT), ephemeral=True
+        embed=base_embed(description="✅ Embed sent.", color=COLOR_SOFT), ephemeral=True
+    )
+
+
+# ---------------------------------------------------------------- /emojisteal (admin)
+
+@bot.tree.command(name="emojisteal", description="Copy a custom emoji from another server into this one.")
+@app_commands.describe(
+    emoji="The custom emoji to copy (paste it or type its name)",
+    name="Optional new name for the emoji",
+)
+@app_commands.default_permissions(manage_emojis_and_stickers=True)
+@app_commands.guild_only()
+async def emojisteal(interaction: discord.Interaction, emoji: str, name: str | None = None):
+    await interaction.response.defer(ephemeral=True)
+
+    partial = None
+    match = EMOJI_MARKUP_RE.search(emoji)
+    if match:
+        partial = discord.PartialEmoji(animated=bool(match.group(1)), name=match.group(2), id=int(match.group(3)))
+    else:
+        # Fall back to finding an emoji the bot can see by its name.
+        name_match = EMOJI_NAME_RE.fullmatch(emoji.strip())
+        if name_match:
+            wanted = name_match.group(1).lower()
+            found = next((e for e in bot.emojis if e.name.lower() == wanted), None)
+            if found:
+                partial = discord.PartialEmoji(animated=found.animated, name=found.name, id=found.id)
+
+    if partial is None:
+        return await interaction.followup.send(
+            embed=base_embed(
+                description="I couldn't find that emoji. Paste the emoji itself, or use a name from a server the bot is in.",
+                color=COLOR_SOFT,
+            ),
+            ephemeral=True,
+        )
+
+    guild = interaction.guild
+    base_name = (name or partial.name or "emoji").strip()[:32]
+    if len(base_name) < 2:
+        base_name = (base_name + "_emoji")[:32]
+
+    existing = {e.name for e in guild.emojis}
+    final_name, counter = base_name, 1
+    while final_name in existing:
+        suffix = f"_{counter}"
+        final_name = f"{base_name[:32 - len(suffix)]}{suffix}"
+        counter += 1
+
+    try:
+        image = await partial.read()
+        created = await guild.create_custom_emoji(
+            name=final_name,
+            image=image,
+            reason=f"Copied by {interaction.user} via /emojisteal",
+        )
+    except discord.HTTPException as exc:
+        return await interaction.followup.send(
+            embed=base_embed(description=f"Could not add the emoji: {exc.text or 'the server may be full.'}", color=COLOR_SOFT),
+            ephemeral=True,
+        )
+
+    await interaction.followup.send(
+        embed=base_embed("😎 Emoji added", f"{created} `:{created.name}:`", COLOR),
+        ephemeral=True,
     )
 
 
@@ -184,123 +334,102 @@ async def embed_cmd(
 
 @bot.tree.command(name="ping", description="Show the bot's current latency.")
 async def ping(interaction: discord.Interaction):
-    ms = round(bot.latency * 1000)
-    status = "Excellent" if ms < 100 else "Good" if ms < 200 else "Degraded"
-    embed = base_embed("Pong", color=COLOR)
-    embed.add_field(name="Latency", value=f"`{ms} ms`", inline=True)
-    embed.add_field(name="Status", value=status, inline=True)
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=build_ping_embed())
 
 
-# ---------------------------------------------------------------- /serverinfo
+@bot.command(name="ping")
+async def ping_prefix(ctx: commands.Context):
+    await ctx.send(embed=build_ping_embed())
+
+
+# ---------------------------------------------------------------- /serverinfo  (prefix: !server)
 
 @bot.tree.command(name="serverinfo", description="Show statistics and information about this server.")
 @app_commands.guild_only()
 async def serverinfo(interaction: discord.Interaction):
-    guild = interaction.guild
-    roles = [r for r in guild.roles if not r.is_default()]
-    humans = sum(1 for m in guild.members if not m.bot)
-    bots = sum(1 for m in guild.members if m.bot)
-    text_channels = len(guild.text_channels)
-    voice_channels = len(guild.voice_channels)
-
-    embed = base_embed(guild.name, guild.description or None, COLOR)
-    if guild.icon:
-        embed.set_thumbnail(url=guild.icon.url)
-
-    embed.add_field(name="Owner", value=guild.owner.mention if guild.owner else "Unknown", inline=True)
-    embed.add_field(name="Boost Level", value=f"{guild.premium_tier} · {guild.premium_subscription_count} boosts", inline=True)
-    embed.add_field(name="Verification", value=str(guild.verification_level).title(), inline=True)
-    embed.add_field(name="Members", value=f"{guild.member_count:,} total\n{humans:,} humans · {bots:,} bots", inline=True)
-    embed.add_field(name="Channels", value=f"{text_channels} text · {voice_channels} voice", inline=True)
-    embed.add_field(name="Roles", value=str(len(roles)), inline=True)
-    embed.add_field(
-        name="Created",
-        value=f"{discord.utils.format_dt(guild.created_at, 'D')}\n{discord.utils.format_dt(guild.created_at, 'R')}",
-        inline=False,
-    )
-    embed.add_field(name="Server ID", value=f"`{guild.id}`", inline=False)
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=build_serverinfo_embed(interaction.guild))
 
 
-# ---------------------------------------------------------------- /userinfo
+@bot.command(name="server")
+@commands.guild_only()
+async def server_prefix(ctx: commands.Context):
+    await ctx.send(embed=build_serverinfo_embed(ctx.guild))
+
+
+# ---------------------------------------------------------------- /userinfo  (prefix: !user)
 
 @bot.tree.command(name="userinfo", description="Show details about a user.")
 @app_commands.describe(member="The user to inspect (default: you)")
 @app_commands.guild_only()
 async def userinfo(interaction: discord.Interaction, member: discord.Member | None = None):
-    member = member or interaction.user
-    roles = [r for r in reversed(member.roles) if not r.is_default()]
-    role_text = " ".join(r.mention for r in roles[:15]) + (f" +{len(roles) - 15} more" if len(roles) > 15 else "")
-
-    embed = base_embed(str(member), color=member.color if member.color.value else COLOR)
-    embed.set_thumbnail(url=member.display_avatar.replace(size=1024).url)
-    embed.add_field(name="Display Name", value=member.display_name, inline=True)
-    embed.add_field(name="User ID", value=f"`{member.id}`", inline=True)
-    embed.add_field(name="Bot", value="Yes" if member.bot else "No", inline=True)
-    embed.add_field(name="Joined Server", value=discord.utils.format_dt(member.joined_at, "D") if member.joined_at else "Unknown", inline=True)
-    embed.add_field(name="Account Created", value=discord.utils.format_dt(member.created_at, "D"), inline=True)
-    embed.add_field(name=f"Roles ({len(roles)})", value=role_text or "None", inline=False)
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=build_userinfo_embed(member or interaction.user))
 
 
-# ---------------------------------------------------------------- /botinfo
+@bot.command(name="user")
+@commands.guild_only()
+async def user_prefix(ctx: commands.Context, member: Optional[discord.Member] = None):
+    await ctx.send(embed=build_userinfo_embed(member or ctx.author))
+
+
+# ---------------------------------------------------------------- /botinfo  (prefix: !botinfo)
 
 @bot.tree.command(name="botinfo", description="Show statistics about the bot.")
 async def botinfo(interaction: discord.Interaction):
-    uptime = (datetime.now(timezone.utc) - START_TIME).total_seconds()
-    total_users = sum(g.member_count or 0 for g in bot.guilds)
-
-    embed = base_embed(BOT_NAME, "Utility and protection bot for your community.", COLOR)
-    embed.set_thumbnail(url=bot.user.display_avatar.url)
-    embed.add_field(name="Uptime", value=fmt_seconds(uptime), inline=True)
-    embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)} ms", inline=True)
-    embed.add_field(name="Version", value=BOT_VERSION, inline=True)
-    embed.add_field(name="Servers", value=f"{len(bot.guilds):,}", inline=True)
-    embed.add_field(name="Users Reached", value=f"{total_users:,}", inline=True)
-    embed.add_field(name="Commands", value=str(len(bot.tree.get_commands())), inline=True)
-    embed.add_field(
-        name="Libraries",
-        value=f"discord.py `{discord.__version__}`\nPython `{platform.python_version()}`",
-        inline=False,
-    )
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=build_botinfo_embed())
 
 
-# ---------------------------------------------------------------- /avatar
+@bot.command(name="botinfo")
+async def botinfo_prefix(ctx: commands.Context):
+    await ctx.send(embed=build_botinfo_embed())
+
+
+# ---------------------------------------------------------------- /avatar  (prefix: !avatar)
 
 @bot.tree.command(name="avatar", description="Show a user's avatar in full size.")
 @app_commands.describe(member="The user whose avatar to show (default: you)")
 async def avatar(interaction: discord.Interaction, member: discord.User | None = None):
-    member = member or interaction.user
-    url = member.display_avatar.with_size(4096).url
-
-    embed = base_embed(f"{member.display_name}'s avatar", color=COLOR)
-    embed.set_image(url=url)
-
-    view = discord.ui.View()
-    view.add_item(discord.ui.Button(label="Download", url=url, style=discord.ButtonStyle.link))
+    embed, view = build_avatar(member or interaction.user)
     await interaction.response.send_message(embed=embed, view=view)
 
 
-# ---------------------------------------------------------------- /help
+@bot.command(name="avatar")
+async def avatar_prefix(ctx: commands.Context, member: Optional[discord.User] = None):
+    embed, view = build_avatar(member or ctx.author)
+    await ctx.send(embed=embed, view=view)
 
+
+# ---------------------------------------------------------------- /help  (prefix: !help)
+
+# (name, description, usage, admin_only)
 COMMANDS_INFO = [
-    ("bot-say", "Send a message without revealing who sent it.", "/bot-say message: [channel]"),
-    ("embed", "Send a custom embed with optional color, footer and image.", "/embed [title] [description] [color] [footer] [image]"),
-    ("ping", "Show the bot's current latency.", "/ping"),
-    ("serverinfo", "Show statistics and information about this server.", "/serverinfo"),
-    ("userinfo", "Show details about a user.", "/userinfo [member]"),
-    ("botinfo", "Show statistics about the bot.", "/botinfo"),
-    ("avatar", "Show a user's avatar at full size with a download link.", "/avatar [member]"),
-    ("help", "Show this interactive command list.", "/help"),
-    ("poll", "Create an interactive poll with up to 5 options.", "/poll question option1 option2 [option3] [option4] [option5]"),
-    ("remind", "Schedule a reminder for you or a channel.", "/remind time reminder [channel]"),
-    ("translate", "Translate a text into another language.", "/translate language text"),
-    ("giveaway start", "Start a giveaway with a time limit and a join button.", "/giveaway start prize duration [winners]"),
-    ("giveaway reroll", "Pick a new winner if the previous one did not claim the prize.", "/giveaway reroll message_id"),
-    ("giveaway end", "End a giveaway early and pick the winner(s).", "/giveaway end message_id"),
+    ("ping", "Show the bot's current latency.", "/ping · !ping", False),
+    ("serverinfo", "Show statistics and information about this server.", "/serverinfo · !server", False),
+    ("userinfo", "Show details about a user.", "/userinfo [member] · !user [member]", False),
+    ("botinfo", "Show statistics about the bot.", "/botinfo · !botinfo", False),
+    ("avatar", "Show a user's avatar at full size with a download link.", "/avatar [member] · !avatar [member]", False),
+    ("help", "Show this interactive command list.", "/help · !help", False),
+    ("poll", "Create an interactive poll with up to 5 options.", "/poll question option1 option2 [option3] [option4] [option5]", False),
+    ("remind", "Schedule a reminder for you or a channel.", "/remind time reminder [channel]", False),
+    ("translate", "Translate a text into another language.", "/translate language text", False),
+    # Admin commands (hidden from /help)
+    ("bot-say", "Send a message without revealing who sent it.", "/bot-say message: [channel]", True),
+    ("embed", "Send a custom embed with optional color, footer and image.", "/embed [title] [description] [color] [footer] [image]", True),
+    ("emojisteal", "Copy a custom emoji from another server into this one.", "/emojisteal emoji [name]", True),
+    ("giveaway start", "Start a giveaway with a time limit and a join button.", "/giveaway start prize duration [winners]", True),
+    ("giveaway reroll", "Pick a new winner if the previous one did not claim the prize.", "/giveaway reroll message_id", True),
+    ("giveaway end", "End a giveaway early and pick the winner(s).", "/giveaway end message_id", True),
 ]
+
+PUBLIC_COMMANDS = [c for c in COMMANDS_INFO if not c[3]]
+
+PREFIX_MAP = {
+    "ping": "ping",
+    "serverinfo": "server",
+    "userinfo": "user",
+    "botinfo": "botinfo",
+    "avatar": "avatar",
+    "help": "help",
+}
 
 
 class HelpSelect(discord.ui.Select):
@@ -308,7 +437,7 @@ class HelpSelect(discord.ui.Select):
         self.owner_id = owner_id
         options = [
             discord.SelectOption(label=f"/{name}", description=desc[:100], value=name)
-            for name, desc, _ in COMMANDS_INFO
+            for name, desc, _, _ in PUBLIC_COMMANDS
         ]
         super().__init__(placeholder="Select a command to see its usage...", options=options)
 
@@ -316,7 +445,7 @@ class HelpSelect(discord.ui.Select):
         if interaction.user.id != self.owner_id:
             return await interaction.response.send_message("This menu belongs to someone else.", ephemeral=True)
         name = self.values[0]
-        _, desc, usage = next(c for c in COMMANDS_INFO if c[0] == name)
+        _, desc, usage, _ = next(c for c in PUBLIC_COMMANDS if c[0] == name)
         embed = base_embed(f"/{name}", desc, COLOR)
         embed.add_field(name="Usage", value=f"`{usage}`", inline=False)
         await interaction.response.edit_message(embed=embed, view=self.view)
@@ -328,12 +457,28 @@ class HelpView(discord.ui.View):
         self.add_item(HelpSelect(owner_id))
 
 
+def build_help_embed() -> discord.Embed:
+    lines = []
+    for name, desc, _, _ in PUBLIC_COMMANDS:
+        line = f"`/{name}` — {desc}"
+        if name in PREFIX_MAP:
+            line += f"  ·  `!{PREFIX_MAP[name]}`"
+        lines.append(line)
+    embed = base_embed(f"📖 {BOT_NAME} · Commands", "\n".join(lines), COLOR)
+    embed.set_footer(text=f"{BOT_NAME} · Use the menu below for details")
+    return embed
+
+
 @bot.tree.command(name="help", description="Show the interactive list of commands.")
 async def help_cmd(interaction: discord.Interaction):
-    lines = [f"`/{name}` — {desc}" for name, desc, _ in COMMANDS_INFO]
-    embed = base_embed(f"{BOT_NAME} · Commands", "\n".join(lines), COLOR)
-    embed.set_footer(text=f"{BOT_NAME} · Use the menu below for details")
-    await interaction.response.send_message(embed=embed, view=HelpView(interaction.user.id), ephemeral=True)
+    await interaction.response.send_message(
+        embed=build_help_embed(), view=HelpView(interaction.user.id), ephemeral=True
+    )
+
+
+@bot.command(name="help")
+async def help_prefix(ctx: commands.Context):
+    await ctx.send(embed=build_help_embed(), view=HelpView(ctx.author.id))
 
 
 # ---------------------------------------------------------------- /poll
@@ -378,7 +523,7 @@ class PollView(discord.ui.View):
             percent = (counts[i] / total * 100) if total else 0
             lines.append(f"**{option}**\n{progress_bar(percent)}  {counts[i]} · {percent:.0f}%")
 
-        embed = base_embed(self.question, "\n\n".join(lines), COLOR)
+        embed = base_embed(f"📊 {self.question}", "\n\n".join(lines), COLOR)
         embed.set_footer(text=f"{total} vote(s) · Click an option again to remove your vote")
         return embed
 
@@ -411,7 +556,7 @@ async def poll(
 
 async def _send_reminder(channel: discord.abc.Messageable, user: discord.abc.User, text: str, delay: int):
     await asyncio.sleep(delay)
-    embed = base_embed("Reminder", text, COLOR)
+    embed = base_embed("⏰ Reminder", text, COLOR)
     embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
     try:
         await channel.send(content=user.mention, embed=embed)
@@ -443,7 +588,7 @@ async def remind(
     asyncio.create_task(_send_reminder(target, interaction.user, reminder, seconds))
     await interaction.response.send_message(
         embed=base_embed(
-            "Reminder set",
+            "⏰ Reminder set",
             f"**When:** in {fmt_seconds(seconds)}\n**Where:** {target.mention}\n**Message:** {reminder}",
             COLOR_SOFT,
         ),
@@ -470,13 +615,13 @@ async def translate(interaction: discord.Interaction, language: str, text: str):
             ephemeral=True,
         )
 
-    embed = base_embed("Translation", color=COLOR)
+    embed = base_embed("🌐 Translation", color=COLOR)
     embed.add_field(name="Original", value=text[:1024], inline=False)
     embed.add_field(name=f"Translated · `{language.lower()}`", value=(translated or "—")[:1024], inline=False)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-# ---------------------------------------------------------------- giveaways
+# ---------------------------------------------------------------- giveaways (admin)
 
 class GiveawayView(discord.ui.View):
     def __init__(self):
@@ -532,7 +677,7 @@ async def _finish_giveaway(gid: int, pick: int | None = None, exclude: set[int] 
             mentions = ", ".join(f"<@{w}>" for w in winners)
             await channel.send(
                 content=mentions,
-                embed=base_embed("Giveaway winner", f"Congratulations {mentions}! You won **{data['prize']}**.", COLOR),
+                embed=base_embed("🏆 Giveaway winner", f"Congratulations {mentions}! You won **{data['prize']}**.", COLOR),
             )
         else:
             await channel.send(embed=base_embed("Giveaway ended", "No valid entries were found.", COLOR_SOFT))
@@ -575,7 +720,7 @@ async def giveaway_start(
         )
 
     ends_at = int(datetime.now(timezone.utc).timestamp()) + seconds
-    embed = base_embed("Giveaway", f"## {prize}", COLOR)
+    embed = base_embed("🎉 Giveaway", f"## {prize}", COLOR)
     embed.add_field(name="Winners", value=str(winners), inline=True)
     embed.add_field(name="Hosted by", value=interaction.user.mention, inline=True)
     embed.add_field(name="Ends", value=f"<t:{ends_at}:R>", inline=True)
