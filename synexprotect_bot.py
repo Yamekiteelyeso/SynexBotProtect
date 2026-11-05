@@ -33,7 +33,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.4.0"
+BOT_VERSION = "1.5.0"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -593,9 +593,9 @@ ADMIN_COMMANDS = [
     ("embed", "Send a custom embed with color, footer and image.", "/embed [title] [description] [color] [footer] [image] [image_url]", "Manage Messages"),
     ("emojisteal", "Copy a custom emoji from another server into this one.", "/emojisteal emoji [name]", "Manage Expressions"),
     ("addemojirole", "Give a role when members react with an emoji.", "/addemojirole emoji role [message_id]", "Manage Roles"),
-    ("giveaway create", "Start a giveaway with a join button and live entries.", "/giveaway create prize duration [winners]  ·  !giveway <prize> <duration> [winners]", "Manage Server"),
+    ("giveaway create", "Start a giveaway. Winners who don't claim in time are rerolled automatically.", "/giveaway create prize duration [winners] [timereclaim]  ·  !giveway prize duration [winners] [timereclaim]", "Manage Server"),
     ("giveaway end", "End a giveaway early and pick the winner(s).", "/giveaway end message_id", "Manage Server"),
-    ("giveaway reroll", "Pick a new winner from an ended giveaway.", "/giveaway reroll message_id  ·  !reroll (reply to the giveaway)", "Manage Server"),
+    ("giveaway reroll", "Reroll winners who have not claimed their prize.", "/giveaway reroll message_id  ·  !reroll (reply to the giveaway)", "Manage Server"),
 ]
 
 PREFIX_MAP = {
@@ -840,8 +840,9 @@ async def timer_prefix(ctx: commands.Context, *, args: str = ""):
         pass
 
     if not await _start_timer(ctx.author, seconds, parts[1]):
-        await ctx.author.send(
-            embed=error_notice("I couldn't send you a DM. Enable direct messages from server members and try again.")
+        await ctx.send(
+            embed=error_notice("I couldn't send you a DM. Enable direct messages from server members and try again."),
+            delete_after=8,
         )
 
 
@@ -867,37 +868,47 @@ async def translate(interaction: discord.Interaction, language: str, text: str):
 
 
 # ---------------------------------------------------------------- giveaways (admin)
-# Built with Components V2 (LayoutView) so the divider and buttons sit inside one container.
+# Built with Components V2 (discord.py 2.6+): one container with text, a divider and buttons.
 
+GIVEAWAY_LOCK = asyncio.Lock()
 JOIN_BUTTON_ID = "giveaway:join"
 ENTRIES_BUTTON_ID = "giveaway:entries"
+TADA_EMOJI = "<a:tada:1567977830346924092>"
+DEFAULT_AVATAR = "https://cdn.discordapp.com/embed/avatars/0.png"
+DEFAULT_RECLAIM = "1h"
 
 
-def _giveaway_text(data: dict) -> tuple[str, str]:
-    header = f"### {GIFT_EMOJI} {data['prize']}"
+def _is_duration(token: str) -> bool:
+    return bool(DURATION_TOKEN_RE.fullmatch(token))
+
+
+def _valid_seconds(text: str, low: int, high: int) -> int | None:
+    seconds = parse_duration(text)
+    if seconds is None or seconds < low or seconds > high:
+        return None
+    return seconds
+
+
+def _giveaway_top_and_body(data: dict) -> tuple[str, str]:
     if data["ended"]:
         footer = f"-# Ended <t:{data['ends_at']}:R> • <t:{data['ends_at']}:f>"
+        winners_value = " ".join(f"<@{w}>" for w in data["winners_list"]) or "No valid entries"
     else:
         remaining = max(0, data["ends_at"] - now_ts())
         footer = f"-# Ends in {fmt_seconds(remaining)} • <t:{data['ends_at']}:f>"
+        winners_value = str(data["winners"])
+
+    top = f"### {GIFT_EMOJI} `|` {data['prize']}\n{footer}"
     body = (
         f"Hosted by: <@{data['host_id']}>\n"
         f"Entries: {len(data['entries']):,}\n"
-        f"Winners: {data['winners']}"
+        f"Winners: {winners_value}"
     )
-    if data["ended"]:
-        winners = data["last_winners"]
-        winner_line = " ".join(f"<@{w}>" for w in winners) if winners else "No valid entries"
-        body = (
-            f"Hosted by: <@{data['host_id']}>\n"
-            f"Entries: {len(data['entries']):,}\n"
-            f"Winners: {winner_line}"
-        )
-    return f"{header}\n{footer}", body
+    return top, body
 
 
 def build_giveaway_layout(data: dict) -> discord.ui.LayoutView:
-    top, body = _giveaway_text(data)
+    top, body = _giveaway_top_and_body(data)
 
     join = discord.ui.Button(
         label="Giveaway ended" if data["ended"] else "Join Giveaway",
@@ -923,7 +934,6 @@ def build_giveaway_layout(data: dict) -> discord.ui.LayoutView:
         discord.ui.TextDisplay(top),
         discord.ui.Separator(visible=True),
         discord.ui.TextDisplay(body),
-        discord.ui.Separator(visible=True),
         row,
         accent_colour=INK,
     )
@@ -969,29 +979,34 @@ async def _entries_callback(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-def _new_giveaway_data(host_id: int, channel_id: int, prize: str, seconds: int, winners: int) -> dict:
+def _new_giveaway_data(host_id: int, channel_id: int, prize: str, seconds: int, winners: int, reclaim: int) -> dict:
     return {
         "prize": prize,
         "winners": winners,
         "entries": set(),
         "ended": False,
-        "last_winners": [],
         "host_id": host_id,
         "channel_id": channel_id,
+        "message_id": 0,
         "ends_at": now_ts() + seconds,
         "seconds": seconds,
+        "reclaim_seconds": reclaim,
+        "winners_list": [],     # current winners (after rerolls)
+        "past_winners": set(),  # everyone ever picked, never picked again
+        "claimed": set(),
+        "announce": {},         # uid -> info about the winner announcement
     }
 
 
 async def _refresh_giveaway_message(gid: int) -> None:
     data = giveaways.get(gid)
-    if not data or data["ended"]:
+    if not data:
         return
     channel = bot.get_channel(data["channel_id"])
     if channel is None:
         return
     try:
-        message = await channel.fetch_message(gid)
+        message = await channel.fetch_message(data["message_id"])
         await message.edit(view=build_giveaway_layout(data))
     except discord.HTTPException:
         pass
@@ -1012,71 +1027,226 @@ async def _ticker(gid: int) -> None:
 
 async def _auto_end(gid: int, delay: int):
     await asyncio.sleep(delay)
-    data = giveaways.get(gid)
-    if data and not data["ended"]:
-        await _finish_giveaway(gid)
+    await _finish_giveaway(gid)
 
 
 def _register_giveaway(message: discord.Message, data: dict) -> None:
+    data["message_id"] = message.id
     giveaways[message.id] = data
     asyncio.create_task(_auto_end(message.id, data["seconds"]))
     asyncio.create_task(_ticker(message.id))
 
 
-async def _notify_winner(user_id: int, guild: discord.Guild | None, prize: str, host_id: int) -> None:
-    user = bot.get_user(user_id) or await bot.fetch_user(user_id)
-    guild_name = guild.name if guild else "the server"
-    embed = discord.Embed(
-        title="🏆  You won a giveaway!",
-        description=(
-            f"Congratulations! You won **{prize}** in **{guild_name}**.\n\n"
-            f"Please claim it quickly: message <@{host_id}> in the server within **24 hours**, "
-            f"or the prize will be rerolled to another entrant."
+async def _resolve_user(uid: int) -> discord.User | None:
+    user = bot.get_user(uid)
+    if user is None:
+        try:
+            user = await bot.fetch_user(uid)
+        except discord.HTTPException:
+            return None
+    return user
+
+
+def build_winner_layout(gid: int, uid: int, info: dict, state: str) -> discord.ui.LayoutView:
+    """state: 'pending' (claim button shown), 'claimed' or 'rerolled'."""
+    data = giveaways.get(gid)
+    prize = data["prize"] if data else "the prize"
+
+    if state == "claimed":
+        status = "✅ Prize claimed."
+    elif state == "rerolled":
+        status = "⏭️ Not claimed in time, so a new winner was picked."
+    else:
+        status = f"-# Claim before <t:{info['deadline']}:R> or the prize will be rerolled."
+
+    section = discord.ui.Section(
+        discord.ui.TextDisplay(
+            f"**Mention:** <@{uid}>\n**Username:** {info['name']}\n**User ID:** `{uid}`"
         ),
-        color=INK,
+        accessory=discord.ui.Thumbnail(media=info["avatar"]),
     )
+
+    children: list = [
+        discord.ui.TextDisplay(f"{TADA_EMOJI} Congratulations <@{uid}>! You won **{prize}**!"),
+        discord.ui.Separator(visible=True),
+        discord.ui.TextDisplay("### Winner"),
+        section,
+        discord.ui.Separator(visible=True),
+        discord.ui.TextDisplay(status),
+    ]
+
+    if state == "pending":
+        claim = discord.ui.Button(
+            label="Claim prize",
+            emoji="🎁",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"giveaway:claim:{gid}:{uid}",
+        )
+        claim.callback = _make_claim_callback(gid, uid)
+        row = discord.ui.ActionRow()
+        row.add_item(claim)
+        children.append(row)
+
+    container = discord.ui.Container(*children, accent_colour=SLATE)
+    layout = discord.ui.LayoutView(timeout=None)
+    layout.add_item(container)
+    return layout
+
+
+def _make_claim_callback(gid: int, uid: int):
+    async def claim(interaction: discord.Interaction):
+        if interaction.user.id != uid:
+            return await interaction.response.send_message(
+                error_notice("Only the winner can claim this prize."), ephemeral=True
+            )
+        data = giveaways.get(gid)
+        info = data["announce"].get(uid) if data else None
+        if info is None or info["status"] != "pending" or uid not in data["winners_list"]:
+            return await interaction.response.send_message(
+                error_notice("This prize can no longer be claimed."), ephemeral=True
+            )
+        if now_ts() > info["deadline"]:
+            return await interaction.response.send_message(
+                error_notice("The claim time has expired."), ephemeral=True
+            )
+
+        data["claimed"].add(uid)
+        info["status"] = "claimed"
+        await interaction.response.edit_message(view=build_winner_layout(gid, uid, info, "claimed"))
+
+    return claim
+
+
+async def _edit_announce(gid: int, uid: int, state: str) -> None:
+    data = giveaways.get(gid)
+    info = data["announce"].get(uid) if data else None
+    if not info:
+        return
+    channel = bot.get_channel(info["channel_id"])
+    if channel is None:
+        return
     try:
-        await user.send(embed=embed)
+        message = await channel.fetch_message(info["message_id"])
+        await message.edit(view=build_winner_layout(gid, uid, info, state))
     except discord.HTTPException:
         pass
 
 
-async def _finish_giveaway(gid: int, pick: int | None = None, exclude: set[int] | None = None) -> list[int] | None:
-    data = giveaways.get(gid)
-    if not data:
+async def _announce_winner(gid: int, uid: int) -> None:
+    data = giveaways[gid]
+    channel = bot.get_channel(data["channel_id"])
+    if channel is None:
+        return
+
+    user = await _resolve_user(uid)
+    info = {
+        "name": user.name if user else "unknown",
+        "avatar": user.display_avatar.url if user else DEFAULT_AVATAR,
+        "deadline": now_ts() + data["reclaim_seconds"],
+        "channel_id": channel.id,
+        "message_id": 0,
+        "status": "pending",
+    }
+    data["announce"][uid] = info
+    message = await channel.send(view=build_winner_layout(gid, uid, info, "pending"))
+    info["message_id"] = message.id
+    asyncio.create_task(_reclaim_watch(gid, uid, info["deadline"]))
+
+
+def _select_winners(gid: int, count: int) -> list[int]:
+    """Picks new winners from entries that were never picked before."""
+    data = giveaways[gid]
+    pool = [u for u in data["entries"] if u not in data["past_winners"]]
+    chosen = random.sample(pool, min(count, len(pool))) if pool else []
+    data["past_winners"].update(chosen)
+    return chosen
+
+
+async def _replace_winner(gid: int, old_uid: int) -> bool:
+    """Caller must hold GIVEAWAY_LOCK."""
+    data = giveaways[gid]
+    data["winners_list"] = [w for w in data["winners_list"] if w != old_uid]
+    if old_uid in data["announce"]:
+        data["announce"][old_uid]["status"] = "rerolled"
+    await _edit_announce(gid, old_uid, "rerolled")
+
+    chosen = _select_winners(gid, 1)
+    if chosen:
+        data["winners_list"].extend(chosen)
+        await _announce_winner(gid, chosen[0])
+    await _refresh_giveaway_message(gid)
+    return bool(chosen)
+
+
+async def _reclaim_watch(gid: int, uid: int, deadline: int) -> None:
+    """If the winner doesn't claim before the deadline, reroll automatically."""
+    await asyncio.sleep(max(0, deadline - now_ts()))
+    async with GIVEAWAY_LOCK:
+        data = giveaways.get(gid)
+        if not data or uid in data["claimed"] or uid not in data["winners_list"]:
+            return
+        await _replace_winner(gid, uid)
+
+
+async def _finish_giveaway(gid: int, count: int | None = None) -> list[int]:
+    async with GIVEAWAY_LOCK:
+        data = giveaways.get(gid)
+        if not data or data["ended"]:
+            return []
+
+        data["ended"] = True
+        data["ends_at"] = min(data["ends_at"], now_ts())
+        chosen = _select_winners(gid, count or data["winners"])
+        data["winners_list"] = list(chosen)
+
+        await _refresh_giveaway_message(gid)
+
+        channel = bot.get_channel(data["channel_id"])
+        if channel is None:
+            return chosen
+        if not chosen:
+            await channel.send(embed=discord.Embed(
+                title="🎉  Giveaway ended", description="No valid entries were found.", color=STEEL
+            ))
+            return chosen
+        for uid in chosen:
+            await _announce_winner(gid, uid)
+        return chosen
+
+
+async def _reroll(gid: int) -> str | None:
+    """Rerolls every winner who has not claimed yet. Returns an error message, or None on success."""
+    async with GIVEAWAY_LOCK:
+        data = giveaways.get(gid)
+        if not data:
+            return "No giveaway found for that message."
+        if not data["ended"]:
+            return "This giveaway is still running. End it first with `/giveaway end`."
+
+        unclaimed = [w for w in data["winners_list"] if w not in data["claimed"]]
+        if data["winners_list"] and not unclaimed:
+            return "Every winner has already claimed the prize."
+
+        if not unclaimed:
+            chosen = _select_winners(gid, 1)
+            if not chosen:
+                return "No eligible entries left to reroll."
+            data["winners_list"].extend(chosen)
+            await _announce_winner(gid, chosen[0])
+            await _refresh_giveaway_message(gid)
+            return None
+
+        results = [await _replace_winner(gid, uid) for uid in unclaimed]
+        if not any(results):
+            return "No eligible entries left to reroll."
         return None
 
-    pool = [u for u in data["entries"] if not exclude or u not in exclude]
-    count = pick if pick is not None else data["winners"]
-    winners = random.sample(pool, min(count, len(pool))) if pool else []
 
-    data["ended"] = True
-    data["last_winners"] = winners
-
-    channel = bot.get_channel(data["channel_id"])
-    if channel:
-        try:
-            message = await channel.fetch_message(gid)
-            await message.edit(view=build_giveaway_layout(data))
-        except discord.HTTPException:
-            pass
-
-        if winners:
-            mentions = " ".join(f"<@{w}>" for w in winners)
-            await channel.send(
-                content=mentions,
-                embed=discord.Embed(
-                    title="🏆  Winner" + ("s" if len(winners) > 1 else ""),
-                    description=f"Congratulations {mentions}! You won **{data['prize']}**.",
-                    color=SLATE,
-                ),
-            )
-            guild = channel.guild
-            for winner in winners:
-                asyncio.create_task(_notify_winner(winner, guild, data["prize"], data["host_id"]))
-        else:
-            await channel.send(embed=discord.Embed(title="🎉  Giveaway ended", description="No valid entries were found.", color=STEEL))
-    return winners
+def _parse_message_id(value: str) -> int | None:
+    try:
+        return int(value.strip())
+    except ValueError:
+        return None
 
 
 giveaway_group = app_commands.Group(
@@ -1091,8 +1261,9 @@ bot.tree.add_command(giveaway_group)
 @giveaway_group.command(name="create", description="Create a giveaway.")
 @app_commands.describe(
     prize="What the winner receives",
-    duration="How long it lasts, e.g. 30m, 2h, 1d or 1h30m",
+    duration="How long the giveaway runs, e.g. 30m, 2h, 10h or 1d",
     winners="Number of winners (1-20, default 1)",
+    timereclaim="Time the winner has to claim, e.g. 30m, 1h, 1d (default 1h)",
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def giveaway_create(
@@ -1100,14 +1271,20 @@ async def giveaway_create(
     prize: str,
     duration: str,
     winners: app_commands.Range[int, 1, 20] = 1,
+    timereclaim: str = DEFAULT_RECLAIM,
 ):
-    seconds = parse_duration(duration)
-    if seconds is None or seconds < 10 or seconds > 30 * 86400:
+    seconds = _valid_seconds(duration, 10, 30 * 86400)
+    reclaim = _valid_seconds(timereclaim, 60, 7 * 86400)
+    if seconds is None:
         return await interaction.response.send_message(
-            embed=error_notice("Use a duration between 10 seconds and 30 days, e.g. `1h` or `2d`."), ephemeral=True
+            embed=error_notice("Use a duration between 10 seconds and 30 days, e.g. `10h` or `1d`."), ephemeral=True
+        )
+    if reclaim is None:
+        return await interaction.response.send_message(
+            embed=error_notice("Use a claim time between 1 minute and 7 days, e.g. `30m` or `1h`."), ephemeral=True
         )
 
-    data = _new_giveaway_data(interaction.user.id, interaction.channel_id, prize, seconds, winners)
+    data = _new_giveaway_data(interaction.user.id, interaction.channel_id, prize, seconds, winners, reclaim)
     await interaction.response.send_message(view=build_giveaway_layout(data))
     message = await interaction.original_response()
     _register_giveaway(message, data)
@@ -1130,28 +1307,7 @@ async def giveaway_end(interaction: discord.Interaction, message_id: str):
     await _finish_giveaway(gid)
 
 
-async def _reroll(gid: int) -> tuple[str | None, list[int] | None]:
-    data = giveaways.get(gid)
-    if not data:
-        return "No giveaway found for that message.", None
-    if not data["ended"]:
-        return "This giveaway is still running. End it first with `/giveaway end`.", None
-
-    previous = set(data["last_winners"])
-    new_winners = await _finish_giveaway(gid, pick=1, exclude=previous)
-    if not new_winners:
-        return "No eligible entries left to reroll.", None
-    return None, new_winners
-
-
-def _parse_message_id(value: str) -> int | None:
-    try:
-        return int(value.strip())
-    except ValueError:
-        return None
-
-
-@giveaway_group.command(name="reroll", description="Pick a new winner for an ended giveaway.")
+@giveaway_group.command(name="reroll", description="Reroll the winners who have not claimed their prize.")
 @app_commands.describe(message_id="ID of the giveaway message")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
@@ -1159,44 +1315,57 @@ async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
     if gid is None:
         return await interaction.response.send_message(error_notice("Invalid message ID."), ephemeral=True)
 
-    error, _ = await _reroll(gid)
+    error = await _reroll(gid)
     if error:
         return await interaction.response.send_message(error_notice(error), ephemeral=True)
     await interaction.response.send_message(notice("✅ New winner selected."), ephemeral=True)
 
 
-def parse_giveaway_args(args: str) -> tuple[str, str, int] | None:
-    tokens = args.split()
-    winners = 1
-    if tokens and tokens[-1].isdigit():
-        winners = int(tokens.pop())
-    if len(tokens) < 2 or not DURATION_TOKEN_RE.fullmatch(tokens[-1]):
+def parse_giveaway_args(args: str) -> tuple[str, str, int, str] | None:
+    """
+    Parses '<prize> <duration> [winners] [timereclaim]' from the end of the text.
+    Examples:  Nitro 10h 1 1h  ·  Nitro 10h 1  ·  Nitro 10h
+    """
+    t = args.split()
+    winners, reclaim = 1, DEFAULT_RECLAIM
+    if len(t) >= 4 and _is_duration(t[-1]) and t[-2].isdigit() and _is_duration(t[-3]):
+        reclaim = t.pop()
+        winners = int(t.pop())
+        duration = t.pop()
+    elif len(t) >= 3 and t[-1].isdigit() and _is_duration(t[-2]):
+        winners = int(t.pop())
+        duration = t.pop()
+    elif len(t) >= 2 and _is_duration(t[-1]):
+        duration = t.pop()
+    else:
         return None
-    duration = tokens.pop()
-    prize = " ".join(tokens).strip()
+
+    prize = " ".join(t).strip()
     if not prize:
         return None
-    return prize, duration, winners
+    return prize, duration, winners, reclaim
 
 
 @bot.command(name="giveway", aliases=["giveaway"])
 @commands.guild_only()
 @commands.has_permissions(manage_guild=True)
 async def giveway_prefix(ctx: commands.Context, *, args: str = ""):
+    usage = "Usage: `!giveway <prize> <duration> [winners] [timereclaim]`, e.g. `!giveway Nitro 10h 1 1h`"
     parsed = parse_giveaway_args(args)
     if parsed is None:
-        return await ctx.send(
-            embed=error_notice("Usage: `!giveway <prize> <duration> [winners]`, e.g. `!giveway Nitro 1h 2`")
-        )
+        return await ctx.send(embed=error_notice(usage))
 
-    prize, duration, winners = parsed
-    seconds = parse_duration(duration)
-    if seconds is None or seconds < 10 or seconds > 30 * 86400:
-        return await ctx.send(error_notice("Use a duration between 10 seconds and 30 days, e.g. `1h` or `2d`."))
+    prize, duration, winners, reclaim_text = parsed
+    seconds = _valid_seconds(duration, 10, 30 * 86400)
+    reclaim = _valid_seconds(reclaim_text, 60, 7 * 86400)
+    if seconds is None:
+        return await ctx.send(embed=error_notice("Use a duration between 10 seconds and 30 days, e.g. `10h` or `1d`."))
+    if reclaim is None:
+        return await ctx.send(embed=error_notice("Use a claim time between 1 minute and 7 days, e.g. `30m` or `1h`."))
     if not 1 <= winners <= 20:
-        return await ctx.send(error_notice("Winners must be between 1 and 20."))
+        return await ctx.send(embed=error_notice("Winners must be between 1 and 20."))
 
-    data = _new_giveaway_data(ctx.author.id, ctx.channel.id, prize, seconds, winners)
+    data = _new_giveaway_data(ctx.author.id, ctx.channel.id, prize, seconds, winners, reclaim)
     message = await ctx.send(view=build_giveaway_layout(data))
     _register_giveaway(message, data)
 
@@ -1207,12 +1376,12 @@ async def giveway_prefix(ctx: commands.Context, *, args: str = ""):
 async def reroll_prefix(ctx: commands.Context):
     ref = ctx.message.reference
     if ref is None or ref.message_id is None:
-        return await ctx.send(error_notice("Reply to a giveaway message with `!reroll`."))
+        return await ctx.send(embed=error_notice("Reply to a giveaway message with `!reroll`."))
 
-    error, _ = await _reroll(ref.message_id)
+    error = await _reroll(ref.message_id)
     if error:
-        return await ctx.send(error_notice(error))
-    await ctx.send(notice("✅ New winner selected."))
+        return await ctx.send(embed=error_notice(error))
+    await ctx.send(embed=notice("✅ New winner selected."))
 
 
 # ---------------------------------------------------------------- run
