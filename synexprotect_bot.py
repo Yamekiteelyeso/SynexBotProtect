@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.8.3"
+BOT_VERSION = "1.8.4"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -54,7 +54,9 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None, case_
 
 giveaways: dict[int, dict] = {}
 
-REACTION_ROLES_FILE = Path(__file__).with_name("reaction_roles.json")
+DATA_DIR = Path(os.getenv("DATA_DIR") or Path(__file__).parent)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+REACTION_ROLES_FILE = DATA_DIR / "reaction_roles.json"
 reaction_roles: dict[str, list[dict]] = {}
 
 EMOJI_MARKUP_RE = re.compile(r"<(a?):([A-Za-z0-9_]+):(\d+)>")
@@ -1553,7 +1555,7 @@ WELCOME_BODY = (
 WELCOME_FOOTER = "Staff tools are above · Only staff can use them"
 WELCOME_PING = "{user} {roles}"
 
-TICKETS_FILE = Path(__file__).with_name("tickets_data.json")
+TICKETS_FILE = DATA_DIR / "tickets_data.json"
 ticket_data: dict = {"counter": 0, "open": {}, "panel": {"channel_id": None, "message_id": None}}
 LINK_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 
@@ -1687,11 +1689,11 @@ def build_ticket_controls(ticket: dict, head: str = "", body: str = "", avatar_u
     )
     container = discord.ui.Container(
         head_block,
-        discord.ui.Separator(),
         discord.ui.TextDisplay(body),
+        discord.ui.TextDisplay("-# Staff tools are above · Only staff can use them"),
+        discord.ui.Separator(),
         discord.ui.ActionRow(staff_menu),
         row_buttons,
-        discord.ui.TextDisplay("-# Staff tools are above · Only staff can use them"),
         accent_colour=STEEL,
     )
     view = discord.ui.LayoutView(timeout=None)
