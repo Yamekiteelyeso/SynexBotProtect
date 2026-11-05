@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.9.0"
+BOT_VERSION = "1.9.1"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -130,7 +130,7 @@ def save_reaction_roles() -> None:
 
 
 def emoji_key_from_partial(emoji: discord.PartialEmoji) -> str:
-    return f"c{emoji.id}" if emoji.id else str(emoji.name)
+    return f"c{emoji.id}" if emoji.id else str(emoji.name).replace("\ufe0f", "")
 
 
 def emoji_key_from_input(text: str) -> str | None:
@@ -138,8 +138,8 @@ def emoji_key_from_input(text: str) -> str | None:
     match = EMOJI_MARKUP_RE.fullmatch(text)
     if match:
         return f"c{match.group(3)}"
-    if text and not re.search(r"[A-Za-z0-9]", text):
-        return text
+    if text and not (text.isascii() and text.isalnum()):
+        return text.replace("\ufe0f", "")
     return None
 
 
@@ -303,6 +303,37 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
     print(f"[prefix error] {error}")
 
 
+def _find_rule(guild_id: int, emoji: discord.PartialEmoji, message_id: int) -> dict | None:
+    key = emoji_key_from_partial(emoji)
+    rules = reaction_roles.get(str(guild_id), [])
+    return next((r for r in rules if r["emoji"] == key and r["message_id"] in (None, message_id)), None)
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if payload.guild_id is None or payload.user_id == bot.user.id:
+        return
+    rule = _find_rule(payload.guild_id, payload.emoji, payload.message_id)
+    if rule is None:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    role = guild.get_role(rule["role_id"]) if guild else None
+    if role is None:
+        return
+    member = guild.get_member(payload.user_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(payload.user_id)
+        except discord.HTTPException:
+            return
+    if member.bot or role not in member.roles:
+        return
+    try:
+        await member.remove_roles(role, reason="Reaction role removed")
+    except discord.HTTPException as exc:
+        print(f"[reaction roles] could not remove role: {exc}")
+
+
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if payload.guild_id is None or payload.user_id == bot.user.id:
@@ -315,6 +346,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         None,
     )
     if rule is None:
+        print(f"[reaction roles] no rule for {key} on message {payload.message_id}")
         return
 
     guild = bot.get_guild(payload.guild_id)
