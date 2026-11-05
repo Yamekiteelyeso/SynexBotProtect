@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.9.1"
+BOT_VERSION = "1.9.2"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -306,7 +306,36 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
 def _find_rule(guild_id: int, emoji: discord.PartialEmoji, message_id: int) -> dict | None:
     key = emoji_key_from_partial(emoji)
     rules = reaction_roles.get(str(guild_id), [])
-    return next((r for r in rules if r["emoji"] == key and r["message_id"] in (None, message_id)), None)
+    exact = [r for r in rules if r["emoji"] == key and r["message_id"] == message_id]
+    if exact:
+        return exact[0]
+    return next((r for r in rules if r["emoji"] == key and r["message_id"] is None), None)
+
+
+@bot.tree.command(name="removeemojirole", description="Remove a reaction role rule.")
+@app_commands.describe(emoji="The emoji of the rule to remove", message_id="Optional: only the rule for this message")
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.guild_only()
+async def removeemojirole(interaction: discord.Interaction, emoji: str, message_id: str | None = None):
+    key = emoji_key_from_input(emoji)
+    if key is None:
+        return await interaction.response.send_message(embed=error_notice("Invalid emoji."), ephemeral=True)
+    msg_id = None
+    if message_id:
+        try:
+            msg_id = int(message_id.strip())
+        except ValueError:
+            return await interaction.response.send_message(embed=error_notice("Invalid message ID."), ephemeral=True)
+    rules = reaction_roles.get(str(interaction.guild_id), [])
+    before = len(rules)
+    rules[:] = [r for r in rules if not (r["emoji"] == key and (msg_id is None or r["message_id"] == msg_id))]
+    save_reaction_roles()
+    removed = before - len(rules)
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} Removed {removed} rule(s) for {emoji}." if removed
+                     else f"No rule found for {emoji}."),
+        ephemeral=True,
+    )
 
 
 @bot.event
@@ -341,10 +370,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
     rules = reaction_roles.get(str(payload.guild_id), [])
     key = emoji_key_from_partial(payload.emoji)
-    rule = next(
-        (r for r in rules if r["emoji"] == key and r["message_id"] in (None, payload.message_id)),
-        None,
-    )
+    rule = _find_rule(payload.guild_id, payload.emoji, payload.message_id)
     if rule is None:
         print(f"[reaction roles] no rule for {key} on message {payload.message_id}")
         return
