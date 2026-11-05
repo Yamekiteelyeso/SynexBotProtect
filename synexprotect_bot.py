@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.8.4"
+BOT_VERSION = "1.9.0"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -305,7 +305,7 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
 
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    if payload.guild_id is None or payload.member is None or payload.member.bot:
+    if payload.guild_id is None or payload.user_id == bot.user.id:
         return
 
     rules = reaction_roles.get(str(payload.guild_id), [])
@@ -322,8 +322,13 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if role is None:
         return
 
-    member = payload.member
-    if role in member.roles:
+    member = payload.member or guild.get_member(payload.user_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(payload.user_id)
+        except discord.HTTPException:
+            return
+    if member.bot or role in member.roles:
         return
 
     try:
@@ -485,11 +490,53 @@ async def emojisteal(interaction: discord.Interaction, emoji: str, name: str | N
 
 # ---------------------------------------------------------------- /addemojirole (admin)
 
+async def _find_message(guild: discord.Guild, message_id: int, prefer: discord.abc.Messageable | None):
+    if prefer is not None:
+        try:
+            return await prefer.fetch_message(message_id)
+        except discord.HTTPException:
+            pass
+    for channel in guild.text_channels:
+        try:
+            return await channel.fetch_message(message_id)
+        except discord.HTTPException:
+            continue
+    return None
+
+
+async def _apply_reaction_role(guild: discord.Guild, emoji_text: str, role: discord.Role,
+                               message: discord.Message | None, msg_id: int | None,
+                               prefer: discord.abc.Messageable | None = None) -> str | None:
+    """Saves the rule and, when a message is given, the bot reacts with the emoji so members can click it."""
+    me = guild.me
+    if role.is_default() or role.managed or role >= me.top_role:
+        return "I can't manage that role. Make sure it's below my highest role and isn't managed by an integration."
+    key = emoji_key_from_input(emoji_text)
+    if key is None:
+        return "Invalid emoji. Paste the emoji itself."
+
+    rules = reaction_roles.setdefault(str(guild.id), [])
+    rules[:] = [r for r in rules if not (r["emoji"] == key and r["message_id"] == msg_id)]
+    rules.append({"emoji": key, "role_id": role.id, "message_id": msg_id})
+    save_reaction_roles()
+
+    if msg_id and message is None:
+        message = await _find_message(guild, msg_id, prefer)
+        if message is None:
+            return "Rule saved, but I couldn't find that message to react to it."
+    if message is not None:
+        try:
+            await message.add_reaction(emoji_text)
+        except discord.HTTPException as exc:
+            return f"Rule saved, but I couldn't add the reaction: {exc.text or exc}. Make sure I'm in the server that owns that emoji."
+    return None
+
+
 @bot.tree.command(name="addemojirole", description="Give a role when members react with an emoji.")
 @app_commands.describe(
-    emoji="The emoji members will react with",
+    emoji="The emoji the bot will put on the message and members will click",
     role="The role to give",
-    message_id="Optional: only work on this message ID (default: any message)",
+    message_id="Message ID to put the emoji on (right-click the message > Copy ID)",
 )
 @app_commands.default_permissions(manage_roles=True)
 @app_commands.guild_only()
@@ -499,17 +546,6 @@ async def addemojirole(
     role: discord.Role,
     message_id: str | None = None,
 ):
-    me = interaction.guild.me
-    if role.is_default() or role.managed or role >= me.top_role:
-        return await interaction.response.send_message(
-            embed=error_notice("I can't manage that role. Make sure it's below my highest role and isn't managed by an integration."),
-            ephemeral=True,
-        )
-
-    key = emoji_key_from_input(emoji)
-    if key is None:
-        return await interaction.response.send_message(embed=error_notice("Invalid emoji. Paste the emoji itself."), ephemeral=True)
-
     msg_id = None
     if message_id:
         try:
@@ -517,18 +553,33 @@ async def addemojirole(
         except ValueError:
             return await interaction.response.send_message(embed=error_notice("Invalid message ID."), ephemeral=True)
 
-    guild_key = str(interaction.guild_id)
-    rules = reaction_roles.setdefault(guild_key, [])
-    rules[:] = [r for r in rules if not (r["emoji"] == key and r["message_id"] == msg_id)]
-    rules.append({"emoji": key, "role_id": role.id, "message_id": msg_id})
-    save_reaction_roles()
+    await interaction.response.defer(ephemeral=True)
+    error = await _apply_reaction_role(interaction.guild, emoji, role, None, msg_id, prefer=interaction.channel)
+    if error:
+        return await interaction.followup.send(embed=error_notice(error), ephemeral=True)
 
     scope = f"message `{msg_id}`" if msg_id else "any message"
     embed = base_embed("🏷️ Reaction role saved", color=CHARCOAL)
     embed.add_field(name="Emoji", value=emoji, inline=True)
     embed.add_field(name="Role", value=role.mention, inline=True)
     embed.add_field(name="Works on", value=scope, inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.command(name="addemojirole")
+@commands.has_permissions(manage_roles=True)
+@commands.guild_only()
+async def addemojirole_prefix(ctx: commands.Context, emoji: str, role: discord.Role):
+    """Reply to a message, then type: !addemojirole <emoji> @role"""
+    ref = ctx.message.reference
+    target = ref.resolved if ref and isinstance(ref.resolved, discord.Message) else None
+    if target is None:
+        return await ctx.send(embed=error_notice("Reply to the message you want, then type `!addemojirole <emoji> @role`."), delete_after=10)
+
+    error = await _apply_reaction_role(ctx.guild, emoji, role, target, target.id)
+    if error:
+        return await ctx.send(embed=error_notice(error), delete_after=12)
+    await ctx.send(embed=notice(f"{E('true', '✅')} {emoji} now gives {role.mention} on that message."), delete_after=8)
 
 
 # ---------------------------------------------------------------- /ping
@@ -800,25 +851,32 @@ async def poll(
 
 # ---------------------------------------------------------------- /timer (private DM reminder)
 
-async def _send_timer(user: discord.abc.User, text: str, delay: int) -> None:
+async def _finish_timer(channel: discord.abc.Messageable, user: discord.abc.User, text: str, delay: int) -> None:
     await asyncio.sleep(delay)
-    embed = base_embed("⏰ Timer finished", text, STEEL)
+    done = base_embed("⏰ Timer finished", text, STEEL)
+    done.add_field(name="Set by", value=user.mention, inline=True)
     try:
-        await user.send(embed=embed)
+        await channel.send(content=user.mention, embed=done, allowed_mentions=discord.AllowedMentions(users=True))
+    except discord.HTTPException as exc:
+        print(f"[timer] could not post in channel: {exc}")
+    try:
+        await user.send(embed=done)
     except discord.HTTPException as exc:
         print(f"[timer] could not send DM: {exc}")
 
 
-async def _start_timer(user: discord.abc.User, seconds: int, text: str) -> bool:
-    """Confirms by DM (only the user sees it) and schedules the reminder, also by DM."""
-    confirm = base_embed("⏰ Timer set", color=STEEL)
-    confirm.add_field(name="Ends in", value=fmt_seconds(seconds), inline=True)
-    confirm.add_field(name="Message", value=text, inline=False)
+async def _start_timer(channel: discord.abc.Messageable, user: discord.abc.User, seconds: int, text: str) -> bool:
+    """Posts a public timer in the channel (live countdown) and DMs the user when it ends."""
+    ends = now_ts() + seconds
+    embed = base_embed("⏰ Timer started", text, STEEL)
+    embed.add_field(name="Set by", value=user.mention, inline=True)
+    embed.add_field(name="Ends", value=f"<t:{ends}:R> · <t:{ends}:f>", inline=True)
     try:
-        await user.send(embed=confirm)
-    except discord.HTTPException:
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as exc:
+        print(f"[timer] could not post timer: {exc}")
         return False
-    asyncio.create_task(_send_timer(user, text, seconds))
+    asyncio.create_task(_finish_timer(channel, user, text, seconds))
     return True
 
 
@@ -829,7 +887,7 @@ def _parse_timer_time(time: str) -> int | None:
     return seconds
 
 
-@bot.tree.command(name="timer", description="Get a private reminder by DM after a set time.")
+@bot.tree.command(name="timer", description="Start a timer everyone can see; you also get a DM when it ends.")
 @app_commands.describe(
     time="How long to wait, e.g. 10m, 2h, 1d or 1h30m",
     reminder="What to remind you about",
@@ -841,13 +899,10 @@ async def timer_cmd(interaction: discord.Interaction, time: str, reminder: str):
         return await interaction.response.send_message(
             embed=error_notice("Use a time between 5 seconds and 30 days, e.g. `10m`, `2h`, `1d`."), ephemeral=True
         )
-    if not await _start_timer(interaction.user, seconds, reminder):
-        return await interaction.response.send_message(
-            embed=error_notice("I couldn't send you a DM. Enable direct messages from server members and try again."),
-            ephemeral=True,
-        )
+    if not await _start_timer(interaction.channel, interaction.user, seconds, reminder):
+        return await interaction.response.send_message(embed=error_notice("I couldn't post the timer here."), ephemeral=True)
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} Timer set. I'll send you a DM in **{fmt_seconds(seconds)}**."), ephemeral=True
+        embed=notice(f"{E('true', '✅')} Timer set for **{fmt_seconds(seconds)}**. Everyone can see it here."), ephemeral=True
     )
 
 
@@ -867,11 +922,8 @@ async def timer_prefix(ctx: commands.Context, *, args: str = ""):
     except discord.HTTPException:
         pass
 
-    if not await _start_timer(ctx.author, seconds, parts[1]):
-        await ctx.send(
-            embed=error_notice("I couldn't send you a DM. Enable direct messages from server members and try again."),
-            delete_after=8,
-        )
+    if not await _start_timer(ctx.channel, ctx.author, seconds, parts[1]):
+        await ctx.send(embed=error_notice("I couldn't post the timer here."), delete_after=8)
 
 
 # ---------------------------------------------------------------- /translate
