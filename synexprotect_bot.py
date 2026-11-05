@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.9.2"
+BOT_VERSION = "1.10.0"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -279,6 +279,7 @@ def build_avatar(user: discord.abc.User) -> tuple[discord.Embed, discord.ui.View
 async def on_ready():
     load_reaction_roles()
     load_tickets()
+    load_welcomes()
     await _sync_tickets_from_discord()
     bot.add_view(build_panel_view())
     for ticket in ticket_data["open"].values():
@@ -2247,6 +2248,89 @@ async def tickets_setup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     await post_panel(interaction.channel, interaction.guild)
     await interaction.followup.send(embed=notice(f"{E('true', '✅')} Panel posted in {interaction.channel.mention}."), ephemeral=True)
+
+
+# ---------------------------------------------------------------- welcomes (new members)
+
+WELCOMES_FILE = DATA_DIR / "welcomes.json"
+WELCOME_SERVER_NAME = "Synex Protect"
+welcome_config: dict[str, int] = {}  # guild_id -> channel_id
+
+
+def load_welcomes() -> None:
+    global welcome_config
+    try:
+        welcome_config = json.loads(WELCOMES_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        welcome_config = {}
+
+
+def save_welcomes() -> None:
+    WELCOMES_FILE.write_text(json.dumps(welcome_config, indent=2), encoding="utf-8")
+
+
+def build_welcome_layout(member: discord.Member) -> discord.ui.LayoutView:
+    title = discord.ui.TextDisplay(
+        f"# {E('GE_member', '👋')} Welcome to {WELCOME_SERVER_NAME}, {member.mention}"
+    )
+    head = discord.ui.Section(title, accessory=discord.ui.Thumbnail(member.display_avatar.url))
+    container = discord.ui.Container(
+        head,
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(
+            "«Thank you for joining Synex Protect. We're excited to have you as part of our community.»"
+        ),
+        discord.ui.TextDisplay(
+            f"-# {E('GE_member', '👤')} Member: {member.mention}\n"
+            f"-# {E('GE_rules', '📜')} Please read our rules and guidelines.\n"
+            f"-# {E('transfer', '🔁')} Stay tuned for upcoming updates."
+        ),
+        discord.ui.Separator(),
+        accent_colour=STEEL,
+    )
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
+    return view
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    channel_id = welcome_config.get(str(member.guild.id))
+    if not channel_id:
+        return
+    channel = member.guild.get_channel(channel_id)
+    if channel is None:
+        return
+    try:
+        await channel.send(
+            view=build_welcome_layout(member),
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+    except discord.HTTPException as exc:
+        print(f"[welcomes] could not send welcome: {exc}")
+
+
+@bot.tree.command(name="welcomes-setup", description="Send new member welcomes to this channel.")
+@app_commands.describe(channel="The channel where welcomes will be sent")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def welcomes_setup(interaction: discord.Interaction, channel: discord.TextChannel):
+    welcome_config[str(interaction.guild_id)] = channel.id
+    save_welcomes()
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} Welcomes will be sent in {channel.mention}."), ephemeral=True
+    )
+
+
+@bot.tree.command(name="welcomes-off", description="Stop sending new member welcomes.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def welcomes_off(interaction: discord.Interaction):
+    welcome_config.pop(str(interaction.guild_id), None)
+    save_welcomes()
+    await interaction.response.send_message(embed=notice("Welcomes are off."), ephemeral=True)
 
 
 # ---------------------------------------------------------------- run
