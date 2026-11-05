@@ -111,13 +111,48 @@ def emoji_key_from_input(text: str) -> str | None:
     return None
 
 
+COLOR_NAMES = {
+    "Black": 0x0B0C0E,
+    "Charcoal": 0x1A1C20,
+    "Gray": 0x4A505A,
+    "Silver": 0x9AA1AC,
+    "White": 0xF2F3F5,
+    "Blue": 0x3B82F6,
+    "Navy": 0x1E3A8A,
+    "Sky": 0x38BDF8,
+    "Teal": 0x14B8A6,
+    "Green": 0x22C55E,
+    "Yellow": 0xFACC15,
+    "Orange": 0xF97316,
+    "Red": 0xEF4444,
+    "Crimson": 0x9F1239,
+    "Pink": 0xEC4899,
+    "Purple": 0xA855F7,
+    "Violet": 0x7C3AED,
+    "Brown": 0x78350F,
+}
+
+
 def parse_color(value: str | None) -> int:
     if not value:
         return CHARCOAL
-    value = value.strip().lstrip("#")
+    value = value.strip()
+    for name, code in COLOR_NAMES.items():
+        if name.lower() == value.lower():
+            return code
+    value = value.lstrip("#")
     if re.fullmatch(r"[0-9a-fA-F]{6}", value):
         return int(value, 16)
     raise ValueError("invalid color")
+
+
+async def color_autocomplete(interaction: discord.Interaction, current: str):
+    text = current.lower().strip()
+    return [
+        app_commands.Choice(name=f"{name}  ·  #{code:06X}", value=name)
+        for name, code in COLOR_NAMES.items()
+        if text in name.lower()
+    ][:25]
 
 
 def parse_duration(text: str) -> int | None:
@@ -319,11 +354,12 @@ async def bot_say(interaction: discord.Interaction, message: str, channel: disco
 @app_commands.describe(
     title="Embed title",
     description="Embed body text",
-    color="Hex color, e.g. 2B2D31",
+    color="Pick a color name (Blue, Red, Purple…) or type a hex code",
     footer="Small text at the bottom",
     image="Upload a picture to show inside the embed",
     image_url="Or paste a direct image link",
 )
+@app_commands.autocomplete(color=color_autocomplete)
 @app_commands.default_permissions(manage_messages=True)
 @app_commands.guild_only()
 async def embed_cmd(
@@ -550,7 +586,7 @@ PUBLIC_COMMANDS = [
     ("botinfo", "Uptime, servers and runtime information.", "/botinfo  ·  !botinfo"),
     ("avatar", "Full-size avatar with a download link.", "/avatar [member]  ·  !avatar [member]"),
     ("help", "This command list.", "/help  ·  !help"),
-    ("remind", "Schedule a reminder for you or a channel.", "/remind time reminder [channel]"),
+    ("timer", "Get a private reminder by DM after a set time.", "/timer time reminder  ·  !timer time reminder"),
     ("translate", "Translate text into another language.", "/translate language text"),
 ]
 
@@ -573,6 +609,7 @@ PREFIX_MAP = {
     "botinfo": "botinfo",
     "avatar": "avatar",
     "help": "help",
+    "timer": "timer",
 }
 
 
@@ -665,7 +702,7 @@ async def helpadmin_prefix(ctx: commands.Context):
 # ---------------------------------------------------------------- /poll (admin, public votes)
 
 class PollView(discord.ui.View):
-    """Public poll: anyone can vote and results update live. Only admins can create polls."""
+    """Public poll: buttons show live vote counts. Only admins can create polls."""
 
     def __init__(self, question: str, options: list[str]):
         super().__init__(timeout=None)
@@ -675,7 +712,7 @@ class PollView(discord.ui.View):
 
         for index, label in enumerate(options):
             button = discord.ui.Button(
-                label=label[:80],
+                label=self._button_label(index),
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"poll:{uuid.uuid4().hex}:{index}",
                 emoji=LETTERS[index],
@@ -683,35 +720,42 @@ class PollView(discord.ui.View):
             button.callback = self._make_vote_callback(index)
             self.add_item(button)
 
-    def _make_vote_callback(self, index: int):
-        async def callback(interaction: discord.Interaction):
-            user_id = interaction.user.id
-            if self.user_choice.get(user_id) == index:
-                del self.user_choice[user_id]          # click the same option again to remove the vote
-            else:
-                self.user_choice[user_id] = index
-            await interaction.response.edit_message(embed=self.build_embed(), view=self)
-        return callback
-
     def counts(self) -> list[int]:
         counts = [0] * len(self.options)
         for choice in self.user_choice.values():
             counts[choice] += 1
         return counts
 
+    def _button_label(self, index: int) -> str:
+        return f"{self.options[index][:50]} · {self.counts()[index]}"
+
+    def _refresh_buttons(self) -> None:
+        for index, item in enumerate(self.children):
+            item.label = self._button_label(index)
+
+    def _make_vote_callback(self, index: int):
+        async def callback(interaction: discord.Interaction):
+            user_id = interaction.user.id
+            if self.user_choice.get(user_id) == index:
+                del self.user_choice[user_id]          # same option again removes the vote
+            else:
+                self.user_choice[user_id] = index
+            self._refresh_buttons()
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        return callback
+
     def build_embed(self) -> discord.Embed:
         counts = self.counts()
         total = sum(counts)
-        lines = []
+        rows = []
         for i, option in enumerate(self.options):
             percent = (counts[i] / total * 100) if total else 0
-            lines.append(
-                f"{LETTERS[i]}  **{option}**\n"
-                f"`{progress_bar(percent)}`  **{percent:.0f}%**  ·  {counts[i]} vote{'s' if counts[i] != 1 else ''}"
-            )
+            rows.append(f"{LETTERS[i]}  **{option}**\n{progress_bar(percent)}  `{percent:.0f}%`")
 
-        embed = base_embed(f"📊  {self.question}", "\n\n".join(lines), SLATE)
-        embed.set_footer(text=f"{total} total vote{'s' if total != 1 else ''} · Click an option to vote · Click again to remove")
+        description = f"### 📊 {self.question}\n\n" + "\n\n".join(rows)
+        embed = discord.Embed(description=description, color=SLATE)
+        votes = f"{total} vote{'s' if total != 1 else ''}"
+        embed.set_footer(text=f"{votes} · Click an option to vote · Click it again to remove your vote")
         return embed
 
 
@@ -743,43 +787,78 @@ async def poll(
 
 # ---------------------------------------------------------------- /remind
 
-async def _send_reminder(channel: discord.abc.Messageable, user: discord.abc.User, text: str, delay: int):
+async def _send_timer(user: discord.abc.User, text: str, delay: int) -> None:
     await asyncio.sleep(delay)
-    embed = base_embed("⏰ Reminder", text, STEEL)
-    embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+    embed = base_embed("⏰ Timer finished", text, STEEL)
     try:
-        await channel.send(content=user.mention, embed=embed)
+        await user.send(embed=embed)
     except discord.HTTPException as exc:
-        print(f"[remind] could not send reminder: {exc}")
+        print(f"[timer] could not send DM: {exc}")
 
 
-@bot.tree.command(name="remind", description="Schedule a reminder for you or a channel.")
-@app_commands.describe(
-    time="When to remind, e.g. 10m, 2h, 1d or 1h30m",
-    reminder="What to remind about",
-    channel="Channel to post the reminder in (default: this one)",
-)
-@app_commands.guild_only()
-async def remind(
-    interaction: discord.Interaction,
-    time: str,
-    reminder: str,
-    channel: discord.TextChannel | None = None,
-):
+async def _start_timer(user: discord.abc.User, seconds: int, text: str) -> bool:
+    """Confirms by DM (only the user sees it) and schedules the reminder, also by DM."""
+    confirm = base_embed("⏰ Timer set", color=STEEL)
+    confirm.add_field(name="Ends in", value=fmt_seconds(seconds), inline=True)
+    confirm.add_field(name="Message", value=text, inline=False)
+    try:
+        await user.send(embed=confirm)
+    except discord.HTTPException:
+        return False
+    asyncio.create_task(_send_timer(user, text, seconds))
+    return True
+
+
+def _parse_timer_time(time: str) -> int | None:
     seconds = parse_duration(time)
     if seconds is None or seconds < 5 or seconds > 30 * 86400:
+        return None
+    return seconds
+
+
+@bot.tree.command(name="timer", description="Get a private reminder by DM after a set time.")
+@app_commands.describe(
+    time="How long to wait, e.g. 10m, 2h, 1d or 1h30m",
+    reminder="What to remind you about",
+)
+@app_commands.guild_only()
+async def timer_cmd(interaction: discord.Interaction, time: str, reminder: str):
+    seconds = _parse_timer_time(time)
+    if seconds is None:
         return await interaction.response.send_message(
             embed=error_notice("Use a time between 5 seconds and 30 days, e.g. `10m`, `2h`, `1d`."),
             ephemeral=True,
         )
+    if not await _start_timer(interaction.user, seconds, reminder):
+        return await interaction.response.send_message(
+            embed=error_notice("I couldn't send you a DM. Enable direct messages from server members and try again."),
+            ephemeral=True,
+        )
+    await interaction.response.send_message(
+        embed=notice(f"✅ Timer set. I'll send you a DM in **{fmt_seconds(seconds)}**."),
+        ephemeral=True,
+    )
 
-    target = channel or interaction.channel
-    asyncio.create_task(_send_reminder(target, interaction.user, reminder, seconds))
-    embed = base_embed("⏰ Reminder scheduled", color=STEEL)
-    embed.add_field(name="When", value=f"In {fmt_seconds(seconds)}", inline=True)
-    embed.add_field(name="Where", value=target.mention, inline=True)
-    embed.add_field(name="Message", value=reminder, inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.command(name="timer")
+@commands.guild_only()
+async def timer_prefix(ctx: commands.Context, *, args: str = ""):
+    parts = args.split(maxsplit=1)
+    if len(parts) < 2:
+        return await ctx.send(error_notice("Usage: `!timer <time> <reminder>`, e.g. `!timer 10m Check the oven`"))
+
+    seconds = _parse_timer_time(parts[0])
+    if seconds is None:
+        return await ctx.send(error_notice("Use a time between 5 seconds and 30 days, e.g. `10m`, `2h`, `1d`."))
+
+    # Remove the command message so the reminder text isn't left in the channel.
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
+
+    if not await _start_timer(ctx.author, seconds, parts[1]):
+        await ctx.author.send(embed=error_notice("I couldn't send you a DM. Enable direct messages from server members and try again."))
 
 
 # ---------------------------------------------------------------- /translate
@@ -811,29 +890,37 @@ async def translate(interaction: discord.Interaction, language: str, text: str):
 
 # ---------------------------------------------------------------- giveaways (admin)
 
+GIFT_EMOJI = "<:gift:1567900881809186889>"
+
+
 def build_giveaway_embed(data: dict) -> discord.Embed:
-    host = f"<@{data['host_id']}>"
-    entries = f"{len(data['entries']):,}"
+    winners = data["last_winners"]
+    winner_line = " ".join(f"<@{w}>" for w in winners) if winners else "No valid entries"
+    header = f"### {GIFT_EMOJI} {data['prize']}"
+    remaining = max(0, data["ends_at"] - int(datetime.now(timezone.utc).timestamp()))
+    footer = f"-# Ends in {fmt_seconds(remaining)} • <t:{data['ends_at']}:f>"
 
     if data["ended"]:
-        winners = data["last_winners"]
-        winner_text = "  ".join(f"<@{w}>" for w in winners) if winners else "No valid entries"
-        embed = base_embed(f"🎉  {data['prize']}", "This giveaway has ended.", INK)
-        embed.add_field(name="🏆  Winner" + ("s" if len(winners) > 1 else ""), value=winner_text, inline=False)
-        embed.add_field(name="👥  Entries", value=entries, inline=True)
-        embed.add_field(name="🎁  Hosted by", value=host, inline=True)
-        return embed
+        description = (
+            f"{header}\n"
+            f"-# Ended <t:{data['ends_at']}:R> • <t:{data['ends_at']}:f>\n"
+            f"Hosted by: <@{data['host_id']}>\n"
+            f"Entries: {len(data['entries'])}\n"
+            f"Winners: {winner_line}"
+        )
+    else:
+        description = (
+            f"{header}\n"
+            f"{footer}\n"
+            f"Hosted by: <@{data['host_id']}>\n"
+            f"Entries: {len(data['entries'])}\n"
+            f"Winners: {data['winners']}"
+        )
+    return discord.Embed(description=description, color=INK)
 
-    embed = base_embed(
-        f"🎉  {data['prize']}",
-        "Press **Enter giveaway** below to join.\n​",
-        INK,
-    )
-    embed.add_field(name="⏳  Ends", value=f"<t:{data['ends_at']}:R>", inline=True)
-    embed.add_field(name="👥  Entries", value=entries, inline=True)
-    embed.add_field(name="🏅  Winners", value=str(data["winners"]), inline=True)
-    embed.add_field(name="🎁  Hosted by", value=host, inline=False)
-    return embed
+
+ENTRIES_BUTTON_ID = "giveaway:entries"
+JOIN_BUTTON_ID = "giveaway:join"
 
 
 class GiveawayView(discord.ui.View):
@@ -841,8 +928,13 @@ class GiveawayView(discord.ui.View):
         super().__init__(timeout=None)
         self.gid: int | None = None
 
-    @discord.ui.button(label="Enter giveaway", emoji="🎟️", style=discord.ButtonStyle.secondary, custom_id="giveaway:enter")
-    async def enter(self, interaction: discord.Interaction, button: discord.ui.Button):
+    def _sync_labels(self, data: dict) -> None:
+        for item in self.children:
+            if item.custom_id == ENTRIES_BUTTON_ID:
+                item.label = f"Entries: {len(data['entries']):,}"
+
+    @discord.ui.button(label="Join Giveaway", emoji="🎟️", style=discord.ButtonStyle.primary, custom_id=JOIN_BUTTON_ID)
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = giveaways.get(self.gid)
         if not data or data["ended"]:
             return await interaction.response.send_message(notice("This giveaway has ended."), ephemeral=True)
@@ -855,13 +947,39 @@ class GiveawayView(discord.ui.View):
             data["entries"].add(uid)
             msg = "✅ You're entered!"
 
+        self._sync_labels(data)
         await interaction.response.edit_message(embed=build_giveaway_embed(data), view=self)
         await interaction.followup.send(notice(msg), ephemeral=True)
 
+    @discord.ui.button(label="Entries: 0", style=discord.ButtonStyle.secondary, custom_id=ENTRIES_BUTTON_ID)
+    async def show_entries(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = giveaways.get(self.gid)
+        if not data:
+            return await interaction.response.send_message(notice("This giveaway no longer exists."), ephemeral=True)
 
-def _disabled(view: discord.ui.View) -> discord.ui.View:
+        entrants = list(data["entries"])
+        count = len(entrants)
+        shown = " ".join(f"<@{uid}>" for uid in entrants[:50])
+        if count > 50:
+            shown += f"\n… and {count - 50:,} more"
+        body = shown if shown else "Nobody has entered yet."
+
+        embed = discord.Embed(
+            title="👥  Giveaway entries",
+            description=f"**{count:,}** member{'s' if count != 1 else ''} entered **{data['prize']}**.\n\n{body}",
+            color=SLATE,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+def _ended_view(data: dict) -> discord.ui.View:
+    view = GiveawayView()
     for item in view.children:
-        item.disabled = True
+        if item.custom_id == JOIN_BUTTON_ID:
+            item.disabled = True
+            item.label = "Giveaway ended"
+            item.style = discord.ButtonStyle.secondary
+    view._sync_labels(data)
     return view
 
 
@@ -881,7 +999,7 @@ async def _finish_giveaway(gid: int, pick: int | None = None, exclude: set[int] 
     if channel:
         try:
             message = await channel.fetch_message(gid)
-            await message.edit(embed=build_giveaway_embed(data), view=_disabled(GiveawayView()))
+            await message.edit(embed=build_giveaway_embed(data), view=_ended_view(data))
         except discord.HTTPException:
             pass
 
@@ -921,10 +1039,38 @@ def _new_giveaway_data(host_id: int, channel_id: int, prize: str, seconds: int, 
     }
 
 
+async def _refresh_giveaway_message(gid: int) -> None:
+    data = giveaways.get(gid)
+    if not data or data["ended"]:
+        return
+    channel = bot.get_channel(data["channel_id"])
+    if channel is None:
+        return
+    try:
+        message = await channel.fetch_message(gid)
+        await message.edit(embed=build_giveaway_embed(data))
+    except discord.HTTPException:
+        pass
+
+
+async def _ticker(gid: int) -> None:
+    """Refreshes the countdown in the giveaway message every minute until it ends."""
+    while True:
+        data = giveaways.get(gid)
+        if not data or data["ended"]:
+            return
+        remaining = data["ends_at"] - int(datetime.now(timezone.utc).timestamp())
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(60, remaining))
+        await _refresh_giveaway_message(gid)
+
+
 def _register_giveaway(message: discord.Message, view: GiveawayView, data: dict) -> None:
     view.gid = message.id
     giveaways[message.id] = data
     asyncio.create_task(_auto_end(message.id, data["seconds"]))
+    asyncio.create_task(_ticker(message.id))
 
 
 def _parse_message_id(value: str) -> int | None:
