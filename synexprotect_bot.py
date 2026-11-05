@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.7.0"
+BOT_VERSION = "1.8.0"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -101,8 +101,18 @@ def notice(text: str, color: int = CHARCOAL) -> discord.Embed:
     return discord.Embed(description=text, color=color)
 
 
+def E(names, fallback: str = "") -> str:
+    """Return a server emoji by name (bot must be in the server that owns it), else fallback."""
+    wanted = [names] if isinstance(names, str) else list(names)
+    for name in wanted:
+        for emoji in bot.emojis:
+            if emoji.name.lower() == name.lower():
+                return str(emoji)
+    return fallback
+
+
 def error_notice(text: str) -> discord.Embed:
-    return discord.Embed(description=f"⚠️ {text}", color=ERROR)
+    return discord.Embed(description=f"{E('Error', '⚠️')} {text}", color=ERROR)
 
 
 def load_reaction_roles() -> None:
@@ -315,7 +325,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         print(f"[reaction roles] could not add role: {exc}")
         return
 
-    text = f"✅ Role **{role.name}** granted."
+    text = f"{E('true', '✅')} Role **{role.name}** granted."
     try:
         await member.send(embed=notice(text))
     except discord.HTTPException:
@@ -353,7 +363,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 async def bot_say(interaction: discord.Interaction, message: str, channel: discord.TextChannel | None = None):
     target = channel or interaction.channel
     await target.send(message, allowed_mentions=discord.AllowedMentions(everyone=False, roles=False))
-    await interaction.response.send_message(embed=notice(f"✅ Message sent to {target.mention}."), ephemeral=True)
+    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Message sent to {target.mention}."), ephemeral=True)
 
 
 # ---------------------------------------------------------------- /embed (admin)
@@ -404,7 +414,7 @@ async def embed_cmd(
         embed.description = "​"
 
     await interaction.channel.send(embed=embed)
-    await interaction.response.send_message(embed=notice("✅ Embed sent."), ephemeral=True)
+    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Embed sent."), ephemeral=True)
 
 
 # ---------------------------------------------------------------- /emojisteal (admin)
@@ -830,7 +840,7 @@ async def timer_cmd(interaction: discord.Interaction, time: str, reminder: str):
             ephemeral=True,
         )
     await interaction.response.send_message(
-        embed=notice(f"✅ Timer set. I'll send you a DM in **{fmt_seconds(seconds)}**."), ephemeral=True
+        embed=notice(f"{E('true', '✅')} Timer set. I'll send you a DM in **{fmt_seconds(seconds)}**."), ephemeral=True
     )
 
 
@@ -965,7 +975,7 @@ async def _join_callback(interaction: discord.Interaction):
         msg = "You left the giveaway."
     else:
         data["entries"].add(uid)
-        msg = "✅ You're entered! Press the button again to leave."
+        msg = f"{E('true', '✅')} You're entered! Press the button again to leave."
 
     await interaction.response.edit_message(view=build_giveaway_layout(data))
     await interaction.followup.send(embed=notice(msg), ephemeral=True)
@@ -1067,7 +1077,7 @@ def emoji_from_bot(name: str, fallback: str) -> str:
 def build_dm_layout(uid: int, info: dict, state: str) -> discord.ui.LayoutView:
     """Private DM to the winner. state: 'pending', 'claimed' or 'rerolled'."""
     if state == "claimed":
-        footer = "✅ Prize claimed. Enjoy!"
+        footer = f"{E('true', '✅')} Prize claimed. Enjoy!"
     elif state == "rerolled":
         footer = "⏭️ Time ran out, so a new winner was picked."
     else:
@@ -1119,7 +1129,7 @@ def build_winner_layout(gid: int, uid: int, info: dict, state: str) -> discord.u
     prize = data["prize"] if data else "the prize"
 
     if state == "claimed":
-        status = "✅ Prize claimed."
+        status = f"{E('true', '✅')} Prize claimed."
     elif state == "rerolled":
         status = "⏭️ Not claimed in time, so a new winner was picked."
     else:
@@ -1398,7 +1408,7 @@ async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
     error = await _reroll(gid)
     if error:
         return await interaction.response.send_message(embed=error_notice(error), ephemeral=True)
-    await interaction.response.send_message(embed=notice("✅ New winner selected."), ephemeral=True)
+    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} New winner selected."), ephemeral=True)
 
 
 def parse_giveaway_args(args: str) -> tuple[str, str, int, str] | None:
@@ -1461,27 +1471,25 @@ async def reroll_prefix(ctx: commands.Context):
     error = await _reroll(ref.message_id)
     if error:
         return await ctx.send(embed=error_notice(error))
-    await ctx.send(embed=notice("✅ New winner selected."))
+    await ctx.send(embed=notice(f"{E('true', '✅')} New winner selected."))
 
 
 # ---------------------------------------------------------------- tickets (preset)
 # The ticket system is configured in this file. /tickets-setup posts the panel.
 
-# ---- Fill these in with your server's IDs (right-click a channel/role > Copy ID, with Developer Mode on)
+# ---- Fill these in with your server's IDs (Developer Mode on > right-click > Copy ID)
 TICKET_CATEGORY_ID: int | None = None        # category where ticket channels are created
 LOGS_CHANNEL_ID: int | None = None           # channel for opened / closed / claimed logs
 TRANSCRIPT_CHANNEL_ID: int | None = None     # channel where transcripts are saved
-SUPPORT_ROLE_IDS: list[int] = []             # staff roles that can see, claim and close tickets
+SUPPORT_ROLE_IDS: list[int] = []             # staff roles that can see, claim and manage tickets
 MAX_OPEN_PER_USER = 1
 INACTIVITY_HOURS = 0                         # 0 = never auto-close idle tickets
 SAVE_TRANSCRIPTS = True
 DM_TRANSCRIPT_ON_CLOSE = True
 
 # ---- Panel
-MEMBER_EMOJI = "<:GE_member:1567977768371888208>"
-STAR_EMOJI = "<:Estrella:1567986997182865508>"
 PANEL_COLOR = STEEL
-PANEL_TEXT = f"""# {MEMBER_EMOJI} Ticket Panel
+PANEL_TEXT = """# {member} Ticket Panel
 
 Need help or experiencing an issue? Our support team is here to assist you.
 
@@ -1493,7 +1501,7 @@ Open a ticket by selecting the appropriate category and describing your situatio
 • Treat our support team with respect.
 • Do not abuse the ticket system.
 
-Thank you for being part of our community! {STAR_EMOJI}"""
+Thank you for being part of our community! {star}"""
 
 TICKET_TYPES = [
     {
@@ -1527,9 +1535,9 @@ TICKET_TYPES = [
 ]
 
 # ---- Welcome message posted inside each new ticket.
-# Placeholders: {user} {username} {number} {option} {roles} {server} {intro}
+# Placeholders: {user} {username} {number} {option} {roles} {server} {intro} {opened}
 WELCOME_COLOR = STEEL
-WELCOME_TITLE = "Welcome, {username}!"
+WELCOME_TITLE = "{welcome} Welcome, {username}!"
 WELCOME_BODY = (
     "Thanks for reaching out to **{server}**. A member of our team will be with you shortly.\n\n"
     "{intro}\n\n"
@@ -1537,11 +1545,12 @@ WELCOME_BODY = (
     "> **Ticket** · #{number}\n"
     "> **Opened** · {opened}"
 )
-WELCOME_FOOTER = "Use the buttons below to claim or close this ticket."
+WELCOME_FOOTER = "Staff tools are below · Only staff can use them"
 WELCOME_PING = "{user} {roles}"
 
 TICKETS_FILE = Path(__file__).with_name("tickets_data.json")
 ticket_data: dict = {"counter": 0, "open": {}, "panel": {"channel_id": None, "message_id": None}}
+LINK_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 
 
 def load_tickets() -> None:
@@ -1582,6 +1591,10 @@ def slugify(text: str) -> str:
     return re.sub(r"[^a-z0-9_-]+", "-", text.lower()).strip("-") or "ticket"
 
 
+def panel_text() -> str:
+    return fill(PANEL_TEXT, member=E("GE_member", "🎫"), star=E("Estrella", "⭐"))
+
+
 async def _log(guild: discord.Guild, embed: discord.Embed) -> None:
     channel = guild.get_channel(LOGS_CHANNEL_ID) if LOGS_CHANNEL_ID else None
     if channel is not None:
@@ -1609,7 +1622,7 @@ def build_panel_view() -> discord.ui.View:
 
 
 def build_panel_embed() -> discord.Embed:
-    return discord.Embed(description=PANEL_TEXT, color=PANEL_COLOR)
+    return discord.Embed(description=panel_text(), color=PANEL_COLOR)
 
 
 async def post_panel(channel: discord.abc.Messageable, guild: discord.Guild) -> discord.Message:
@@ -1627,6 +1640,29 @@ async def post_panel(channel: discord.abc.Messageable, guild: discord.Guild) -> 
     ticket_data["panel"] = {"channel_id": channel.id, "message_id": message.id}
     save_tickets()
     return message
+
+
+# ---------------------------------------------------------------- ticket controls
+
+def build_ticket_controls(ticket: dict) -> discord.ui.View:
+    links_on = ticket.get("links_allowed", True)
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(label="Close Ticket", emoji=E("Error", "🔒"),
+                                    style=discord.ButtonStyle.danger, custom_id="tk:close", row=0))
+    view.add_item(discord.ui.Button(label="Reclaim Ticket", emoji=E("community", "🙋"),
+                                    style=discord.ButtonStyle.primary, custom_id="tk:claim", row=0))
+    view.add_item(discord.ui.Button(label="Transfer to other staff", emoji=E("transfer", "🔁"),
+                                    style=discord.ButtonStyle.secondary, custom_id="tk:transfer", row=1))
+    view.add_item(discord.ui.Button(label=f"Accept links: {'On' if links_on else 'Off'}",
+                                    emoji=E(["link~2", "link_2", "link2", "link"], "🔗"),
+                                    style=discord.ButtonStyle.secondary, custom_id="tk:links", row=1))
+    view.add_item(discord.ui.Button(label="Rename channel", emoji=E("support", "✏️"),
+                                    style=discord.ButtonStyle.secondary, custom_id="tk:rename", row=1))
+    view.add_item(discord.ui.Button(label="Add user", emoji=E("true", "➕"),
+                                    style=discord.ButtonStyle.success, custom_id="tk:adduser", row=1))
+    view.add_item(discord.ui.Button(label="Take out user", emoji=E("false", "➖"),
+                                    style=discord.ButtonStyle.danger, custom_id="tk:removeuser", row=1))
+    return view
 
 
 # ---------------------------------------------------------------- opening
@@ -1657,7 +1693,8 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
             view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True,
         ),
         guild.me: discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, manage_channels=True, read_message_history=True,
+            view_channel=True, send_messages=True, manage_channels=True,
+            manage_messages=True, read_message_history=True,
         ),
     }
     roles = [r for r in (guild.get_role(rid) for rid in SUPPORT_ROLE_IDS) if r is not None]
@@ -1674,7 +1711,7 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
             embed=error_notice(f"I couldn't create the ticket: {exc.text or 'missing permissions.'}"), ephemeral=True
         )
 
-    ticket_data["open"][str(channel.id)] = {
+    ticket = {
         "user_id": interaction.user.id,
         "type": ttype["label"],
         "type_key": ttype["key"],
@@ -1682,10 +1719,13 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
         "claimed_by": None,
         "opened_at": now_ts(),
         "last_activity": now_ts(),
+        "links_allowed": True,
     }
+    ticket_data["open"][str(channel.id)] = ticket
     save_tickets()
 
     values = dict(
+        welcome=E("community", "👋"),
         username=interaction.user.display_name,
         user=interaction.user.mention,
         number=f"{number:04d}",
@@ -1704,27 +1744,25 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
     welcome.set_thumbnail(url=interaction.user.display_avatar.url)
     welcome.set_footer(text=WELCOME_FOOTER)
 
-    controls = discord.ui.View(timeout=None)
-    controls.add_item(discord.ui.Button(label="Close", emoji="🔒", style=discord.ButtonStyle.secondary, custom_id="tk:close"))
-    controls.add_item(discord.ui.Button(label="Claim", emoji="🙋", style=discord.ButtonStyle.secondary, custom_id="tk:claim"))
-
     await channel.send(
         content=fill(WELCOME_PING, **values).strip() or None,
         embed=welcome,
-        view=controls,
+        view=build_ticket_controls(ticket),
         allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False),
     )
 
-    log = base_embed("🎫 Ticket opened", color=STEEL)
+    log = base_embed(f"{E('community', '🎫')} Ticket opened", color=STEEL)
     log.add_field(name="Channel", value=channel.mention, inline=True)
     log.add_field(name="Opened by", value=interaction.user.mention, inline=True)
     log.add_field(name="Type", value=ttype["label"], inline=True)
     await _log(guild, log)
 
-    await interaction.followup.send(embed=notice(f"✅ Your ticket is ready: {channel.mention}"), ephemeral=True)
+    await interaction.followup.send(
+        embed=notice(f"{E('true', '✅')} Your ticket is ready: {channel.mention}"), ephemeral=True
+    )
 
 
-# ---------------------------------------------------------------- closing / claiming
+# ---------------------------------------------------------------- closing
 
 async def _transcript_bytes(channel: discord.TextChannel) -> bytes:
     lines = []
@@ -1762,7 +1800,7 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
             except discord.HTTPException:
                 pass
 
-    log = base_embed("🔒 Ticket closed", color=STEEL)
+    log = base_embed(f"{E('Error', '🔒')} Ticket closed", color=STEEL)
     log.add_field(name="Channel", value=channel.name, inline=True)
     log.add_field(name="Opened by", value=owner_mention, inline=True)
     log.add_field(name="Type", value=ticket["type"], inline=True)
@@ -1773,7 +1811,7 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
     if DM_TRANSCRIPT_ON_CLOSE:
         owner = await _resolve_user(ticket["user_id"])
         if owner is not None:
-            dm_embed = base_embed("🔒 Your ticket was closed", f"**{ticket['type']}** · open for {duration}", STEEL)
+            dm_embed = base_embed(f"{E('warn3', '🔒')} Your ticket was closed", f"**{ticket['type']}** · open for {duration}", STEEL)
             try:
                 kwargs = {"file": transcript_file()} if data is not None else {}
                 await owner.send(embed=dm_embed, **kwargs)
@@ -1792,10 +1830,10 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
 
 
 class ConfirmView(discord.ui.View):
-    def __init__(self, on_confirm, label: str = "Confirm"):
+    def __init__(self, on_confirm, label: str = "Confirm", style: discord.ButtonStyle = discord.ButtonStyle.danger):
         super().__init__(timeout=60)
         self.on_confirm = on_confirm
-        button = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, emoji="✅")
+        button = discord.ui.Button(label=label, style=style, emoji="✅")
         button.callback = self._confirm
         self.add_item(button)
 
@@ -1823,26 +1861,126 @@ async def _request_close(interaction: discord.Interaction) -> None:
     )
 
 
-async def _claim(interaction: discord.Interaction) -> None:
+# ---------------------------------------------------------------- staff tools
+
+def _staff_only(interaction: discord.Interaction):
     ticket = ticket_data["open"].get(str(interaction.channel_id))
     if ticket is None:
-        return await interaction.response.send_message(embed=error_notice("This isn't a ticket channel."), ephemeral=True)
+        return None, error_notice("This isn't a ticket channel.")
     if not is_staff(interaction.user):
-        return await interaction.response.send_message(embed=error_notice("Only staff can claim tickets."), ephemeral=True)
-    if ticket["claimed_by"]:
-        return await interaction.response.send_message(
-            embed=error_notice(f"Already claimed by <@{ticket['claimed_by']}>."), ephemeral=True
-        )
+        return None, error_notice("Only staff can use this.")
+    return ticket, None
+
+
+async def _claim(interaction: discord.Interaction) -> None:
+    ticket, err = _staff_only(interaction)
+    if err:
+        return await interaction.response.send_message(embed=err, ephemeral=True)
+    if ticket["claimed_by"] == interaction.user.id:
+        return await interaction.response.send_message(embed=error_notice("You already claimed this ticket."), ephemeral=True)
 
     ticket["claimed_by"] = interaction.user.id
     ticket["last_activity"] = now_ts()
     save_tickets()
-    await interaction.response.send_message(embed=notice(f"🙋 {interaction.user.mention} claimed this ticket."))
+    await interaction.response.send_message(
+        content=f"{E('community', '🙋')} <@{ticket['user_id']}> **Attend your ticket**, {interaction.user.mention}.",
+        allowed_mentions=discord.AllowedMentions(users=True),
+    )
 
-    log = base_embed("🙋 Ticket claimed", color=STEEL)
+    log = base_embed(f"{E('community', '🙋')} Ticket claimed", color=STEEL)
     log.add_field(name="Channel", value=interaction.channel.mention, inline=True)
     log.add_field(name="Claimed by", value=interaction.user.mention, inline=True)
     await _log(interaction.guild, log)
+
+
+class UserPickView(discord.ui.View):
+    """Ephemeral picker: runs on_pick with the chosen member."""
+
+    def __init__(self, placeholder: str, on_pick):
+        super().__init__(timeout=120)
+        select = discord.ui.UserSelect(placeholder=placeholder, min_values=1, max_values=1)
+
+        async def chosen(interaction: discord.Interaction):
+            member = interaction.guild.get_member(select.values[0].id)
+            if member is None:
+                return await interaction.response.send_message(embed=error_notice("That member isn't in this server."), ephemeral=True)
+            await on_pick(interaction, member)
+
+        select.callback = chosen
+        self.add_item(select)
+
+
+async def _transfer(interaction: discord.Interaction) -> None:
+    ticket, err = _staff_only(interaction)
+    if err:
+        return await interaction.response.send_message(embed=err, ephemeral=True)
+
+    async def on_pick(inter: discord.Interaction, member: discord.Member):
+        if not is_staff(member):
+            return await inter.response.send_message(embed=error_notice("You can only transfer to a staff member."), ephemeral=True)
+        ticket["claimed_by"] = member.id
+        save_tickets()
+        await inter.response.send_message(embed=notice(f"{E('transfer', '🔁')} Ticket transferred to {member.mention}."), ephemeral=True)
+        await interaction.channel.send(
+            content=f"{E('transfer', '🔁')} Ticket transferred to {member.mention}.",
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
+
+    await interaction.response.send_message(
+        embed=notice("Pick the staff member who will take over this ticket."),
+        view=UserPickView("Pick a staff member…", on_pick),
+        ephemeral=True,
+    )
+
+
+async def _toggle_links(interaction: discord.Interaction) -> None:
+    ticket, err = _staff_only(interaction)
+    if err:
+        return await interaction.response.send_message(embed=err, ephemeral=True)
+    ticket["links_allowed"] = not ticket.get("links_allowed", True)
+    save_tickets()
+    await interaction.response.edit_message(view=build_ticket_controls(ticket))
+
+
+class RenameModal(discord.ui.Modal, title="Rename channel"):
+    new_name = discord.ui.TextInput(label="New channel name", max_length=90, placeholder="billing-issue")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name = slugify(self.new_name.value)
+        await interaction.channel.edit(name=name, reason=f"Renamed by {interaction.user}")
+        await interaction.response.send_message(embed=notice(f"{E('support', '✏️')} Channel renamed to `{name}`."), ephemeral=True)
+
+
+async def _rename(interaction: discord.Interaction) -> None:
+    _, err = _staff_only(interaction)
+    if err:
+        return await interaction.response.send_message(embed=err, ephemeral=True)
+    await interaction.response.send_modal(RenameModal())
+
+
+async def _add_or_remove_user(interaction: discord.Interaction, add: bool) -> None:
+    ticket, err = _staff_only(interaction)
+    if err:
+        return await interaction.response.send_message(embed=err, ephemeral=True)
+
+    async def on_pick(inter: discord.Interaction, member: discord.Member):
+        channel = inter.channel
+        if add:
+            await channel.set_permissions(
+                member, view_channel=True, send_messages=True, read_message_history=True,
+                attach_files=True, embed_links=True, reason=f"Added by {inter.user}",
+            )
+            text = f"{E('true', '✅')} {member.mention} was added to this ticket."
+        else:
+            if member.id == ticket["user_id"]:
+                return await inter.response.send_message(embed=error_notice("You can't remove the ticket owner."), ephemeral=True)
+            await channel.set_permissions(member, overwrite=None, reason=f"Removed by {inter.user}")
+            text = f"{E('false', '❌')} {member.mention} was removed from this ticket."
+        await inter.response.send_message(embed=notice(text), ephemeral=True)
+        await channel.send(content=text, allowed_mentions=discord.AllowedMentions.none())
+
+    placeholder = "Pick a member to add…" if add else "Pick a member to remove…"
+    await interaction.response.send_message(view=UserPickView(placeholder, on_pick), ephemeral=True)
 
 
 @bot.event
@@ -1857,14 +1995,36 @@ async def on_interaction(interaction: discord.Interaction):
             await _request_close(interaction)
         elif custom_id == "tk:claim":
             await _claim(interaction)
+        elif custom_id == "tk:transfer":
+            await _transfer(interaction)
+        elif custom_id == "tk:links":
+            await _toggle_links(interaction)
+        elif custom_id == "tk:rename":
+            await _rename(interaction)
+        elif custom_id == "tk:adduser":
+            await _add_or_remove_user(interaction, add=True)
+        elif custom_id == "tk:removeuser":
+            await _add_or_remove_user(interaction, add=False)
     except discord.HTTPException as exc:
         print(f"[tickets] interaction error: {exc}")
 
 
 @bot.event
 async def on_message(message: discord.Message):
-    if message.guild is not None and str(message.channel.id) in ticket_data["open"]:
-        ticket_data["open"][str(message.channel.id)]["last_activity"] = now_ts()
+    if message.guild is not None and not message.author.bot:
+        ticket = ticket_data["open"].get(str(message.channel.id))
+        if ticket is not None:
+            ticket["last_activity"] = now_ts()
+            if not ticket.get("links_allowed", True) and LINK_RE.search(message.content or "") \
+                    and not is_staff(message.author):
+                try:
+                    await message.delete()
+                    await message.channel.send(
+                        embed=notice(f"{E(['link~2', 'link_2', 'link2', 'link'], '🔗')} Links are turned off in this ticket."),
+                        delete_after=6,
+                    )
+                except discord.HTTPException:
+                    pass
     await bot.process_commands(message)
 
 
@@ -1896,7 +2056,7 @@ async def _inactivity_loop() -> None:
 async def tickets_setup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     await post_panel(interaction.channel, interaction.guild)
-    await interaction.followup.send(embed=notice(f"✅ Panel posted in {interaction.channel.mention}."), ephemeral=True)
+    await interaction.followup.send(embed=notice(f"{E('true', '✅')} Panel posted in {interaction.channel.mention}."), ephemeral=True)
 
 
 # ---------------------------------------------------------------- run
