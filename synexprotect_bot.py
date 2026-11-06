@@ -9,7 +9,7 @@ import platform
 import random
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.14.0"
+BOT_VERSION = "1.15.0"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -332,6 +332,9 @@ async def on_ready():
     load_welcomes()
     load_autoroles()
     load_antiraid()
+    load_modlog()
+    for guild in bot.guilds:
+        await _refresh_invites(guild)
     await _sync_tickets_from_discord()
     bot.add_view(build_panel_view())
     for ticket in ticket_data["open"].values():
@@ -744,6 +747,14 @@ ADMIN_COMMANDS = [
     ("welcomes-setup", "Send new member welcomes to a channel.", "/welcomes-setup channel", "Manage Server"),
     ("welcomes-on", "Turn welcomes back on in the default channel.", "/welcomes-on", "Manage Server"),
     ("welcomes-off", "Turn new member welcomes off.", "/welcomes-off", "Manage Server"),
+    ("ban", "Ban a member, or a user by ID, and optionally delete their recent messages.", "/ban member [reason] [delete_days]  ·  !ban user [reason]", "Ban Members"),
+    ("unban", "Unban a user by their ID.", "/unban user_id [reason]  ·  !unban user_id [reason]", "Ban Members"),
+    ("kick", "Kick a member from the server.", "/kick member [reason]  ·  !kick member [reason]", "Kick Members"),
+    ("mute", "Mute (timeout) a member for a set time, up to 28 days.", "/mute member duration [reason]  ·  !mute member duration [reason]", "Moderate Members"),
+    ("unmute", "Remove a member's mute.", "/unmute member [reason]  ·  !unmute member [reason]", "Moderate Members"),
+    ("modlog-setup", "Send moderation, invite and voice logs to a channel.", "/modlog-setup channel", "Manage Server"),
+    ("modlog-events", "Choose which events are logged.", "/modlog-events", "Manage Server"),
+    ("modlog-off", "Stop sending logs.", "/modlog-off", "Manage Server"),
     ("antiraid", "Owner-only panel for anti-nuke, anti-webhook, anti-raid, trusted users and alerts.", "/antiraid", "Server owner"),
 ]
 
@@ -756,6 +767,8 @@ HELP_CATEGORIES = {
         ("Giveaways", ["giveaway create", "giveaway end", "giveaway reroll"]),
         ("Tickets", ["tickets-setup", "categorytickets"]),
         ("Welcome & roles", ["welcomes-setup", "welcomes-on", "welcomes-off", "autorol", "autorol-off", "addemojirole", "removeemojirole"]),
+        ("Moderation", ["ban", "unban", "kick", "mute", "unmute"]),
+        ("Logs", ["modlog-setup", "modlog-events", "modlog-off"]),
         ("Protection", ["antiraid"]),
         ("Moderation & tools", ["poll", "bot-say", "embed", "emojisteal"]),
     ],
@@ -772,6 +785,11 @@ PREFIX_MAP = {
     "giveaway create": "giveway",
     "reroll": "reroll",
     "addemojirole": "addemojirole",
+    "ban": "ban",
+    "unban": "unban",
+    "kick": "kick",
+    "mute": "mute",
+    "unmute": "unmute",
 }
 
 class CommandSelect(discord.ui.Select):
@@ -2325,6 +2343,7 @@ def save_autoroles() -> None:
 
 @bot.event
 async def on_member_join(member: discord.Member):
+    await _log_invite_join(member)
     if await _antiraid_join(member):
         return
     role_id = autoroles.get(str(member.guild.id))
@@ -2634,11 +2653,13 @@ async def on_guild_role_create(role: discord.Role):
 
 @bot.event
 async def on_member_ban(guild: discord.Guild, user: discord.User):
+    await _log_ban(guild, user)
     await _nuke_event(guild, "ban", user.id)
 
 
 @bot.event
 async def on_member_remove(member: discord.Member):
+    await _log_kick(member)
     await _nuke_event(member.guild, "kick", member.id)
 
 
@@ -3083,6 +3104,494 @@ async def antiraid_cmd(interaction: discord.Interaction):
             embed=error_notice("Only the server owner can open the protection panel."), ephemeral=True
         )
     await interaction.response.send_message(view=build_protection_layout(interaction.guild), ephemeral=True)
+
+
+MODLOG_FILE = DATA_DIR / "modlog.json"
+MODLOG_EVENTS = {
+    "ban": "Bans",
+    "unban": "Unbans",
+    "kick": "Kicks",
+    "mute": "Mutes (timeouts)",
+    "unmute": "Unmutes",
+    "invite_create": "Invite created",
+    "invite_delete": "Invite deleted",
+    "invite_join": "Member joined by invite",
+    "voice": "Voice join, leave and move",
+}
+MAX_TIMEOUT_SECONDS = 28 * 86400
+
+modlog_config: dict[str, dict] = {}
+_invite_cache: dict[int, dict[str, int]] = {}
+
+
+def load_modlog() -> None:
+    global modlog_config
+    try:
+        modlog_config = json.loads(MODLOG_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        modlog_config = {}
+
+
+def save_modlog() -> None:
+    MODLOG_FILE.write_text(json.dumps(modlog_config, indent=2), encoding="utf-8")
+
+
+def modlog_cfg(gid: int) -> dict:
+    cfg = modlog_config.setdefault(str(gid), {"channel": None, "events": {}})
+    for event in MODLOG_EVENTS:
+        cfg["events"].setdefault(event, True)
+    return cfg
+
+
+async def _modlog(guild: discord.Guild, event: str, embed: discord.Embed) -> None:
+    cfg = modlog_cfg(guild.id)
+    if not cfg["channel"] or not cfg["events"].get(event, True):
+        return
+    channel = guild.get_channel(cfg["channel"])
+    if channel is None:
+        return
+    try:
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as exc:
+        print(f"[modlog] could not post: {exc}")
+
+
+def _log_embed(title: str, color: int, fields: list[tuple[str, str]]) -> discord.Embed:
+    embed = base_embed(title, None, color)
+    for name, value in fields:
+        value = value or "None"
+        embed.add_field(name=name, value=value, inline=len(value) < 60)
+    return embed
+
+
+def _event_on(guild: discord.Guild, event: str) -> bool:
+    cfg = modlog_cfg(guild.id)
+    return bool(cfg["channel"]) and cfg["events"].get(event, True)
+
+
+def _chan(channel) -> str:
+    return f"<#{channel.id}>" if channel else "Unknown"
+
+
+def _who(target) -> str:
+    if isinstance(target, (discord.Member, discord.User)):
+        return f"{target.mention} · `{target.id}`"
+    return f"`{target.id}`"
+
+
+async def _audit_peek(guild: discord.Guild, action, target_id: int | None = None, max_age: int = 20):
+    try:
+        async for entry in guild.audit_logs(limit=25, action=action):
+            if (discord.utils.utcnow() - entry.created_at).total_seconds() > max_age:
+                break
+            if target_id is not None and getattr(entry.target, "id", None) != target_id:
+                continue
+            return entry
+    except discord.HTTPException:
+        pass
+    return None
+
+
+def _hierarchy_error(guild: discord.Guild, moderator: discord.Member, target: discord.Member) -> str | None:
+    if target.id == moderator.id:
+        return "You can't use this on yourself."
+    if target.id == guild.owner_id:
+        return "I can't moderate the server owner."
+    if moderator.id != guild.owner_id and target.top_role >= moderator.top_role:
+        return "Their highest role is equal to or above yours."
+    if target.top_role >= guild.me.top_role:
+        return "My highest role is below theirs. Move my role higher in Server Settings."
+    return None
+
+
+def _reason(moderator: discord.Member, reason: str) -> str:
+    return f"{moderator} ({moderator.id}): {reason}"[:500]
+
+
+async def mod_ban(guild, moderator, target, reason: str, delete_days: int = 0) -> tuple[bool, str]:
+    if isinstance(target, discord.Member):
+        error = _hierarchy_error(guild, moderator, target)
+        if error:
+            return False, error
+    try:
+        await guild.ban(target, reason=_reason(moderator, reason), delete_message_days=delete_days)
+    except discord.HTTPException as exc:
+        return False, f"I couldn't ban that user: {exc.text or exc}"
+    await _modlog(guild, "ban", _log_embed(
+        f"{E('Error', '⚠️')} Member banned", ERROR,
+        [("Member", _who(target)), ("Moderator", moderator.mention), ("Reason", reason),
+         ("Messages deleted", f"{delete_days} day(s)")],
+    ))
+    return True, f"{E('true', '✅')} Banned {_who(target)}."
+
+
+async def mod_unban(guild, moderator, user_id: int, reason: str) -> tuple[bool, str]:
+    try:
+        user = await bot.fetch_user(user_id)
+    except discord.HTTPException:
+        return False, "That user ID doesn't exist."
+    try:
+        await guild.unban(discord.Object(id=user_id), reason=_reason(moderator, reason))
+    except discord.NotFound:
+        return False, "That user isn't banned."
+    except discord.HTTPException as exc:
+        return False, f"I couldn't unban them: {exc.text or exc}"
+    await _modlog(guild, "unban", _log_embed(
+        f"{E('true', '✅')} Member unbanned", CHARCOAL,
+        [("Member", _who(user)), ("Moderator", moderator.mention), ("Reason", reason)],
+    ))
+    return True, f"{E('true', '✅')} Unbanned {user.mention}."
+
+
+async def mod_kick(guild, moderator, member: discord.Member, reason: str) -> tuple[bool, str]:
+    error = _hierarchy_error(guild, moderator, member)
+    if error:
+        return False, error
+    try:
+        await member.kick(reason=_reason(moderator, reason))
+    except discord.HTTPException as exc:
+        return False, f"I couldn't kick them: {exc.text or exc}"
+    await _modlog(guild, "kick", _log_embed(
+        f"{E('warn3', '⚠️')} Member kicked", ERROR,
+        [("Member", _who(member)), ("Moderator", moderator.mention), ("Reason", reason)],
+    ))
+    return True, f"{E('true', '✅')} Kicked {_who(member)}."
+
+
+async def mod_mute(guild, moderator, member: discord.Member, seconds: int, reason: str) -> tuple[bool, str]:
+    error = _hierarchy_error(guild, moderator, member)
+    if error:
+        return False, error
+    if not 5 <= seconds <= MAX_TIMEOUT_SECONDS:
+        return False, "The mute must be between 5 seconds and 28 days."
+    until = discord.utils.utcnow() + timedelta(seconds=seconds)
+    try:
+        await member.timeout(until, reason=_reason(moderator, reason))
+    except discord.HTTPException as exc:
+        return False, f"I couldn't mute them: {exc.text or exc}"
+    await _modlog(guild, "mute", _log_embed(
+        f"{E('GE_Lock', '🔒')} Member muted", STEEL,
+        [("Member", _who(member)), ("Moderator", moderator.mention), ("Duration", fmt_seconds(seconds)),
+         ("Reason", reason)],
+    ))
+    return True, f"{E('true', '✅')} Muted {_who(member)} for **{fmt_seconds(seconds)}**."
+
+
+async def mod_unmute(guild, moderator, member: discord.Member, reason: str) -> tuple[bool, str]:
+    if not member.is_timed_out():
+        return False, f"{member.mention} isn't muted."
+    try:
+        await member.timeout(None, reason=_reason(moderator, reason))
+    except discord.HTTPException as exc:
+        return False, f"I couldn't unmute them: {exc.text or exc}"
+    await _modlog(guild, "unmute", _log_embed(
+        f"{E('true', '✅')} Member unmuted", CHARCOAL,
+        [("Member", _who(member)), ("Moderator", moderator.mention), ("Reason", reason)],
+    ))
+    return True, f"{E('true', '✅')} Unmuted {member.mention}."
+
+
+@bot.tree.command(name="ban", description="Ban a member from the server.")
+@app_commands.describe(member="The member to ban", reason="Why", delete_days="Days of their messages to delete (0-7)")
+@app_commands.default_permissions(ban_members=True)
+@app_commands.checks.has_permissions(ban_members=True)
+@app_commands.guild_only()
+async def ban_cmd(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given",
+                  delete_days: app_commands.Range[int, 0, 7] = 0):
+    ok, text = await mod_ban(interaction.guild, interaction.user, member, reason, delete_days)
+    await interaction.response.send_message(embed=notice(text) if ok else error_notice(text), ephemeral=True)
+
+
+@bot.command(name="ban")
+@commands.guild_only()
+@commands.has_permissions(ban_members=True)
+async def ban_prefix(ctx: commands.Context, user: discord.User, *, reason: str = "No reason given"):
+    member = ctx.guild.get_member(user.id)
+    ok, text = await mod_ban(ctx.guild, ctx.author, member or user, reason)
+    await ctx.send(embed=notice(text) if ok else error_notice(text), delete_after=None if ok else 12)
+
+
+@bot.tree.command(name="unban", description="Unban a user by their ID.")
+@app_commands.describe(user_id="The user's ID", reason="Why")
+@app_commands.default_permissions(ban_members=True)
+@app_commands.checks.has_permissions(ban_members=True)
+@app_commands.guild_only()
+async def unban_cmd(interaction: discord.Interaction, user_id: str, reason: str = "No reason given"):
+    try:
+        uid = int(user_id.strip())
+    except ValueError:
+        return await interaction.response.send_message(embed=error_notice("Invalid user ID."), ephemeral=True)
+    ok, text = await mod_unban(interaction.guild, interaction.user, uid, reason)
+    await interaction.response.send_message(embed=notice(text) if ok else error_notice(text), ephemeral=True)
+
+
+@bot.command(name="unban")
+@commands.guild_only()
+@commands.has_permissions(ban_members=True)
+async def unban_prefix(ctx: commands.Context, user_id: int, *, reason: str = "No reason given"):
+    ok, text = await mod_unban(ctx.guild, ctx.author, user_id, reason)
+    await ctx.send(embed=notice(text) if ok else error_notice(text), delete_after=None if ok else 12)
+
+
+@bot.tree.command(name="kick", description="Kick a member from the server.")
+@app_commands.describe(member="The member to kick", reason="Why")
+@app_commands.default_permissions(kick_members=True)
+@app_commands.checks.has_permissions(kick_members=True)
+@app_commands.guild_only()
+async def kick_cmd(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given"):
+    ok, text = await mod_kick(interaction.guild, interaction.user, member, reason)
+    await interaction.response.send_message(embed=notice(text) if ok else error_notice(text), ephemeral=True)
+
+
+@bot.command(name="kick")
+@commands.guild_only()
+@commands.has_permissions(kick_members=True)
+async def kick_prefix(ctx: commands.Context, member: discord.Member, *, reason: str = "No reason given"):
+    ok, text = await mod_kick(ctx.guild, ctx.author, member, reason)
+    await ctx.send(embed=notice(text) if ok else error_notice(text), delete_after=None if ok else 12)
+
+
+@bot.tree.command(name="mute", description="Mute (timeout) a member for a set time.")
+@app_commands.describe(member="The member to mute", duration="e.g. 10m, 2h, 1d (max 28d)", reason="Why")
+@app_commands.default_permissions(moderate_members=True)
+@app_commands.checks.has_permissions(moderate_members=True)
+@app_commands.guild_only()
+async def mute_cmd(interaction: discord.Interaction, member: discord.Member, duration: str, reason: str = "No reason given"):
+    seconds = parse_duration(duration)
+    if seconds is None:
+        return await interaction.response.send_message(embed=error_notice("Use a time like `10m`, `2h` or `1d`."), ephemeral=True)
+    ok, text = await mod_mute(interaction.guild, interaction.user, member, seconds, reason)
+    await interaction.response.send_message(embed=notice(text) if ok else error_notice(text), ephemeral=True)
+
+
+@bot.command(name="mute")
+@commands.guild_only()
+@commands.has_permissions(moderate_members=True)
+async def mute_prefix(ctx: commands.Context, member: discord.Member, duration: str, *, reason: str = "No reason given"):
+    seconds = parse_duration(duration)
+    if seconds is None:
+        return await ctx.send(embed=error_notice("Use a time like `10m`, `2h` or `1d`."), delete_after=12)
+    ok, text = await mod_mute(ctx.guild, ctx.author, member, seconds, reason)
+    await ctx.send(embed=notice(text) if ok else error_notice(text), delete_after=None if ok else 12)
+
+
+@bot.tree.command(name="unmute", description="Remove a member's mute (timeout).")
+@app_commands.describe(member="The member to unmute", reason="Why")
+@app_commands.default_permissions(moderate_members=True)
+@app_commands.checks.has_permissions(moderate_members=True)
+@app_commands.guild_only()
+async def unmute_cmd(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given"):
+    ok, text = await mod_unmute(interaction.guild, interaction.user, member, reason)
+    await interaction.response.send_message(embed=notice(text) if ok else error_notice(text), ephemeral=True)
+
+
+@bot.command(name="unmute")
+@commands.guild_only()
+@commands.has_permissions(moderate_members=True)
+async def unmute_prefix(ctx: commands.Context, member: discord.Member, *, reason: str = "No reason given"):
+    ok, text = await mod_unmute(ctx.guild, ctx.author, member, reason)
+    await ctx.send(embed=notice(text) if ok else error_notice(text), delete_after=None if ok else 12)
+
+
+class ModlogEventsSelect(discord.ui.Select):
+    def __init__(self, guild: discord.Guild):
+        self.guild_id = guild.id
+        cfg = modlog_cfg(guild.id)
+        super().__init__(
+            placeholder="Choose what gets logged…",
+            min_values=0,
+            max_values=len(MODLOG_EVENTS),
+            options=[
+                discord.SelectOption(label=label, value=key, default=cfg["events"].get(key, True))
+                for key, label in MODLOG_EVENTS.items()
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message(embed=error_notice("You need Manage Server for this."), ephemeral=True)
+        cfg = modlog_cfg(self.guild_id)
+        for key in MODLOG_EVENTS:
+            cfg["events"][key] = key in self.values
+        save_modlog()
+        await interaction.response.edit_message(embed=notice(f"{E('true', '✅')} Log events updated."), view=None)
+
+
+@bot.tree.command(name="modlog-setup", description="Send moderation, invite and voice logs to this channel.")
+@app_commands.describe(channel="The channel for the logs")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def modlog_setup(interaction: discord.Interaction, channel: discord.TextChannel):
+    modlog_cfg(interaction.guild_id)["channel"] = channel.id
+    save_modlog()
+    await _refresh_invites(interaction.guild)
+    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Logs will be sent in {channel.mention}."), ephemeral=True)
+
+
+@bot.tree.command(name="modlog-off", description="Stop sending logs.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def modlog_off(interaction: discord.Interaction):
+    modlog_cfg(interaction.guild_id)["channel"] = None
+    save_modlog()
+    await interaction.response.send_message(embed=notice("Logs are off."), ephemeral=True)
+
+
+@bot.tree.command(name="modlog-events", description="Choose which events are logged.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def modlog_events(interaction: discord.Interaction):
+    view = discord.ui.View(timeout=300)
+    view.add_item(ModlogEventsSelect(interaction.guild))
+    await interaction.response.send_message(
+        embed=notice("Pick the events to log. Unselected events are turned off."), view=view, ephemeral=True
+    )
+
+
+async def _log_ban(guild: discord.Guild, user: discord.User) -> None:
+    if not _event_on(guild, "ban"):
+        return
+    entry = await _audit_peek(guild, discord.AuditLogAction.ban, user.id)
+    if entry is not None and entry.user is not None and entry.user.id == bot.user.id:
+        return
+    await _modlog(guild, "ban", _log_embed(
+        f"{E('Error', '⚠️')} Member banned", ERROR,
+        [("Member", _who(user)), ("Moderator", entry.user.mention if entry and entry.user else "Unknown"),
+         ("Reason", entry.reason if entry and entry.reason else "None")],
+    ))
+
+
+async def _log_unban(guild: discord.Guild, user: discord.User) -> None:
+    if not _event_on(guild, "unban"):
+        return
+    entry = await _audit_peek(guild, discord.AuditLogAction.unban, user.id)
+    if entry is not None and entry.user is not None and entry.user.id == bot.user.id:
+        return
+    await _modlog(guild, "unban", _log_embed(
+        f"{E('true', '✅')} Member unbanned", CHARCOAL,
+        [("Member", _who(user)), ("Moderator", entry.user.mention if entry and entry.user else "Unknown")],
+    ))
+
+
+async def _log_kick(member: discord.Member) -> None:
+    if not _event_on(member.guild, "kick"):
+        return
+    entry = await _audit_peek(member.guild, discord.AuditLogAction.kick, member.id)
+    if entry is None or (entry.user is not None and entry.user.id == bot.user.id):
+        return
+    await _modlog(member.guild, "kick", _log_embed(
+        f"{E('warn3', '⚠️')} Member kicked", ERROR,
+        [("Member", _who(member)), ("Moderator", entry.user.mention if entry.user else "Unknown"),
+         ("Reason", entry.reason or "None")],
+    ))
+
+
+async def _log_timeout(before: discord.Member, after: discord.Member) -> None:
+    if not _event_on(after.guild, "mute") and not _event_on(after.guild, "unmute"):
+        return
+    entry = await _audit_peek(after.guild, discord.AuditLogAction.member_update, after.id)
+    if entry is None or entry.user is None or entry.user.id == bot.user.id:
+        return
+    if after.is_timed_out():
+        await _modlog(after.guild, "mute", _log_embed(
+            f"{E('GE_Lock', '🔒')} Member muted", STEEL,
+            [("Member", _who(after)), ("Moderator", entry.user.mention),
+             ("Until", discord.utils.format_dt(after.timed_out_until, "f")), ("Reason", entry.reason or "None")],
+        ))
+    else:
+        await _modlog(after.guild, "unmute", _log_embed(
+            f"{E('true', '✅')} Member unmuted", CHARCOAL,
+            [("Member", _who(after)), ("Moderator", entry.user.mention), ("Reason", entry.reason or "None")],
+        ))
+
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    if before.timed_out_until != after.timed_out_until:
+        await _log_timeout(before, after)
+
+
+@bot.event
+async def on_member_unban(guild: discord.Guild, user: discord.User):
+    await _log_unban(guild, user)
+
+
+async def _refresh_invites(guild: discord.Guild) -> None:
+    try:
+        invites = await guild.invites()
+    except discord.HTTPException:
+        return
+    _invite_cache[guild.id] = {invite.code: (invite.uses or 0) for invite in invites}
+
+
+@bot.event
+async def on_invite_create(invite: discord.Invite):
+    guild = invite.guild
+    _invite_cache.setdefault(guild.id, {})[invite.code] = invite.uses or 0
+    expires = "Never" if not invite.max_age else discord.utils.format_dt(
+        discord.utils.utcnow() + timedelta(seconds=invite.max_age), "R")
+    await _modlog(guild, "invite_create", _log_embed(
+        f"{E('community', '🔗')} Invite created", CHARCOAL,
+        [("Code", f"`discord.gg/{invite.code}`"), ("Channel", _chan(invite.channel)),
+         ("Created by", invite.inviter.mention if invite.inviter else "Unknown"),
+         ("Max uses", str(invite.max_uses) if invite.max_uses else "Unlimited"), ("Expires", expires)],
+    ))
+
+
+@bot.event
+async def on_invite_delete(invite: discord.Invite):
+    guild = invite.guild
+    _invite_cache.get(guild.id, {}).pop(invite.code, None)
+    await _modlog(guild, "invite_delete", _log_embed(
+        f"{E('false', '❌')} Invite deleted", STEEL,
+        [("Code", f"`discord.gg/{invite.code}`"), ("Channel", _chan(invite.channel))],
+    ))
+
+
+async def _log_invite_join(member: discord.Member) -> None:
+    guild = member.guild
+    if not _event_on(guild, "invite_join"):
+        return
+    try:
+        invites = await guild.invites()
+    except discord.HTTPException:
+        return
+    previous = _invite_cache.get(guild.id, {})
+    current = {invite.code: invite for invite in invites}
+    used = next((inv for code, inv in current.items() if (inv.uses or 0) > previous.get(code, 0)), None)
+    gone = [code for code in previous if code not in current]
+    _invite_cache[guild.id] = {code: (inv.uses or 0) for code, inv in current.items()}
+    if used is not None:
+        code_text = f"`discord.gg/{used.code}`"
+        inviter_text = used.inviter.mention if used.inviter else "Unknown"
+        channel_text = _chan(used.channel)
+    elif len(gone) == 1:
+        code_text, inviter_text, channel_text = f"`discord.gg/{gone[0]}`", "Unknown", "Unknown"
+    else:
+        code_text, inviter_text, channel_text = "Unknown (vanity or unknown link)", "Unknown", "Unknown"
+    await _modlog(guild, "invite_join", _log_embed(
+        f"{E('GE_member', '👤')} Member joined by invite", CHARCOAL,
+        [("Member", _who(member)), ("Invite", code_text), ("Invited by", inviter_text), ("Channel", channel_text)],
+    ))
+
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if member.bot or before.channel == after.channel:
+        return
+    if before.channel is None:
+        title, color, fields = f"{E('community', '🔊')} Joined voice", CHARCOAL, [
+            ("Member", _who(member)), ("Channel", after.channel.mention)]
+    elif after.channel is None:
+        title, color, fields = f"{E('false', '❌')} Left voice", STEEL, [
+            ("Member", _who(member)), ("Channel", before.channel.mention)]
+    else:
+        title, color, fields = f"{E('transfer', '🔁')} Moved voice", CHARCOAL, [
+            ("Member", _who(member)), ("From", before.channel.mention), ("To", after.channel.mention)]
+    await _modlog(member.guild, "voice", _log_embed(title, color, fields))
 
 
 if __name__ == "__main__":
