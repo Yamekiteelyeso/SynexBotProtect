@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.20.0"
+BOT_VERSION = "1.21.0"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -783,6 +783,9 @@ ADMIN_COMMANDS = [
     ("welcomes-setup", "Send new member welcomes to a channel.", "/welcomes-setup channel", "Manage Server"),
     ("welcomes-on", "Turn welcomes back on in the default channel.", "/welcomes-on", "Manage Server"),
     ("welcomes-off", "Turn new member welcomes off.", "/welcomes-off", "Manage Server"),
+    ("welcomes-button", "Set a welcome button: position, text, https link and optional emoji.", "/welcomes-button slot label url [emoji]", "Manage Server"),
+    ("welcomes-button-remove", "Remove a welcome button by its position.", "/welcomes-button-remove slot", "Manage Server"),
+    ("welcomes-buttons-reset", "Restore the default welcome buttons.", "/welcomes-buttons-reset", "Manage Server"),
     ("tickets-log", "Ticket log: who opened it, who claimed it, duration, members and transcript.", "/tickets-log [number]", "Staff"),
     ("invites-setup", "Post a message whenever someone joins with an invite, with their invite count.", "/invites-setup channel", "Manage Server"),
     ("invites-off", "Stop posting invite messages.", "/invites-off", "Manage Server"),
@@ -2466,13 +2469,110 @@ WELCOME_LINKS = [
     ("Tickets", ["NofiTicket"], "https://discord.com/channels/1557386505226420385/1557389744957292555"),
 ]
 
+WELCOME_BUTTONS_FILE = DATA_DIR / "welcome_buttons.json"
+welcome_buttons_config: dict[str, list[dict]] = {}
+WELCOME_BUTTON_LIMIT = 5
+
+
+def load_welcome_buttons() -> None:
+    global welcome_buttons_config
+    try:
+        welcome_buttons_config = json.loads(WELCOME_BUTTONS_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        welcome_buttons_config = {}
+
+
+def save_welcome_buttons() -> None:
+    WELCOME_BUTTONS_FILE.write_text(json.dumps(welcome_buttons_config, indent=2), encoding="utf-8")
+
+
+def welcome_buttons_for(guild_id: int) -> list[dict]:
+    custom = welcome_buttons_config.get(str(guild_id))
+    if custom is not None:
+        return [dict(btn) for btn in custom]
+    return [{"label": label, "url": url, "names": names} for label, names, url in WELCOME_LINKS]
+
+
+def _welcome_button(btn: dict) -> discord.ui.Button:
+    emoji = btn.get("emoji") or E(btn.get("names", []), "🔗")
+    return discord.ui.Button(label=btn["label"], emoji=emoji, style=discord.ButtonStyle.link, url=btn["url"])
+
+
+load_welcome_buttons()
+
+
+@bot.tree.command(name="welcomes-button", description="Set one welcome button: text, link and optional emoji.")
+@app_commands.describe(slot="Button position, 1 to 5", label="Button text", url="Link, starting with https://", emoji="Optional emoji")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def welcomes_button(
+    interaction: discord.Interaction,
+    slot: app_commands.Range[int, 1, WELCOME_BUTTON_LIMIT],
+    label: app_commands.Range[str, 1, 80],
+    url: str,
+    emoji: str | None = None,
+):
+    url = url.strip()
+    if not url.startswith("https://"):
+        return await interaction.response.send_message(embed=error_notice("The link must start with https://"), ephemeral=True)
+    emoji_value = None
+    if emoji and emoji.strip():
+        try:
+            discord.PartialEmoji.from_str(emoji.strip())
+        except (ValueError, TypeError):
+            return await interaction.response.send_message(embed=error_notice("That emoji is not valid."), ephemeral=True)
+        emoji_value = emoji.strip()
+    buttons = welcome_buttons_for(interaction.guild_id)
+    if slot > len(buttons) + 1:
+        return await interaction.response.send_message(
+            embed=error_notice(f"Fill slot {len(buttons) + 1} first."), ephemeral=True
+        )
+    entry = {"label": label.strip(), "url": url, "emoji": emoji_value}
+    if slot > len(buttons):
+        buttons.append(entry)
+    else:
+        buttons[slot - 1] = entry
+    welcome_buttons_config[str(interaction.guild_id)] = buttons
+    save_welcome_buttons()
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} Welcome button {slot} saved: **{entry['label']}**."), ephemeral=True
+    )
+
+
+@bot.tree.command(name="welcomes-button-remove", description="Remove one welcome button by its position.")
+@app_commands.describe(slot="Button position, 1 to 5")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def welcomes_button_remove(interaction: discord.Interaction, slot: app_commands.Range[int, 1, WELCOME_BUTTON_LIMIT]):
+    buttons = welcome_buttons_for(interaction.guild_id)
+    if slot > len(buttons):
+        return await interaction.response.send_message(embed=error_notice("There is no button in that slot."), ephemeral=True)
+    if len(buttons) == 1:
+        return await interaction.response.send_message(
+            embed=error_notice("A welcome message needs at least one button."), ephemeral=True
+        )
+    buttons.pop(slot - 1)
+    welcome_buttons_config[str(interaction.guild_id)] = buttons
+    save_welcome_buttons()
+    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Welcome button {slot} removed."), ephemeral=True)
+
+
+@bot.tree.command(name="welcomes-buttons-reset", description="Restore the default welcome buttons.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def welcomes_buttons_reset(interaction: discord.Interaction):
+    welcome_buttons_config.pop(str(interaction.guild_id), None)
+    save_welcome_buttons()
+    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Default welcome buttons restored."), ephemeral=True)
+
+
 def build_welcome_layout(member: discord.Member) -> discord.ui.LayoutView:
     title = discord.ui.TextDisplay(f"# {E('GE_member', '👋')} Welcome to {WELCOME_SERVER_NAME},")
     head = discord.ui.Section(title, accessory=discord.ui.Thumbnail(member.display_avatar.url))
-    buttons = discord.ui.ActionRow(*[
-        discord.ui.Button(label=label, emoji=E(names, "🔗"), style=discord.ButtonStyle.link, url=url)
-        for label, names, url in WELCOME_LINKS
-    ])
+    buttons = discord.ui.ActionRow(*[_welcome_button(btn) for btn in welcome_buttons_for(member.guild.id)])
     container = discord.ui.Container(
         head,
         discord.ui.Separator(),
