@@ -2486,4 +2486,36 @@ async def autorol(interaction: discord.Interaction, role: discord.Role):
 async def autorol_off(interaction: discord.Interaction):
     autoroles.pop(str(interaction.guild_id), None)
     save_autoroles()
-    await interaction.response.send_message(em
+    await interaction.response.send_message(embed=notice("Auto role is off."), ephemeral=True)
+
+
+@bot.tree.command(name="welcomes-on", description="Turn welcomes back on in the default welcome channel.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def welcomes_on(interaction: discord.Interaction):
+    welcome_config.pop(str(interaction.guild_id), None)  # back to the default channel
+    save_welcomes()
+    channel = interaction.guild.get_channel(DEFAULT_WELCOME_CHANNEL_ID)
+    where = channel.mention if channel else f"`{DEFAULT_WELCOME_CHANNEL_ID}`"
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} Welcomes are on in {where}."), ephemeral=True
+    )
+
+
+@bot.tree.command(name="welcomes-off", description="Stop sending new member welcomes.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def welcomes_off(interaction: discord.Interaction):
+    welcome_config[str(interaction.guild_id)] = 0
+    save_welcomes()
+    await interaction.response.send_message(embed=notice("Welcomes are off."), ephemeral=True)
+
+
+# ---------------------------------------------------------------- run
+
+if __name__ == "__main__":
+    if not TOKEN:
+        raise SystemExit("DISCORD_TOKEN is not set. Add it to your .env file.")
+    bot.run(TOKEN) 
