@@ -4722,9 +4722,9 @@ async def afk_prefix(ctx: commands.Context, *, reason: str = "AFK"):
     if ctx.guild is None:
         return
     renamed = await _start_afk(ctx.author, reason[:120])
-    if not renamed:
-        await ctx.reply("No pude poner [AFK] en tu apodo. Revisa que mi rol esté por encima del tuyo y que tenga el permiso Gestionar apodos.",
-                        mention_author=False)
+    note = "" if renamed else "\n-# No pude poner [AFK] en tu apodo: revisa que mi rol esté por encima del tuyo y que tenga Gestionar apodos."
+    await ctx.reply(embed=base_embed(f"{E('warn3', '😴')} {tr(ctx.guild.id, 'afk.now')}", reason[:120] + note, STEEL),
+                    mention_author=False)
 
 
 @bot.tree.command(name="afk", description="Set yourself as AFK. Mentions are logged for when you return.")
@@ -4732,8 +4732,9 @@ async def afk_prefix(ctx: commands.Context, *, reason: str = "AFK"):
 @app_commands.guild_only()
 async def afk_slash(interaction: discord.Interaction, reason: app_commands.Range[str, 1, 120] = "AFK"):
     renamed = await _start_afk(interaction.user, reason)
-    msg = "AFK activado." if renamed else "No pude poner [AFK] en tu apodo. Revisa que mi rol esté por encima del tuyo y que tenga el permiso Gestionar apodos."
-    await interaction.response.send_message(msg, ephemeral=True)
+    note = "" if renamed else "\n-# No pude poner [AFK] en tu apodo: revisa que mi rol esté por encima del tuyo y que tenga Gestionar apodos."
+    await interaction.response.send_message(
+        embed=base_embed(f"{E('warn3', '😴')} {tr(interaction.guild_id, 'afk.now')}", reason + note, STEEL), ephemeral=True)
 
 
 async def _afk_on_message(message: discord.Message) -> None:
