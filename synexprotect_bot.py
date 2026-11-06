@@ -811,6 +811,10 @@ ADMIN_COMMANDS = [
     ("modlog-setup", "Send moderation, invite and voice logs to a channel.", "/modlog-setup channel", "Manage Server"),
     ("modlog-events", "Choose which events are logged.", "/modlog-events", "Manage Server"),
     ("modlog-off", "Stop sending logs.", "/modlog-off", "Manage Server"),
+    ("tickets-settings", "Show the current ticket category, channels, roles and limits.", "/tickets-settings", "Manage Server"),
+    ("autorol-settings", "Show the role given to new members.", "/autorol-settings", "Manage Roles"),
+    ("modlog-settings", "Show the current log channel and logged events.", "/modlog-settings", "Manage Server"),
+    ("servername-settings", "Show the name the bot uses for this server.", "/servername-settings", "Manage Server"),
     ("antiraid", "Owner-only panel for anti-nuke, anti-webhook, anti-raid, trusted users and alerts.", "/antiraid", "Server owner"),
 ]
 
@@ -822,12 +826,12 @@ HELP_CATEGORIES = {
     ],
     "admin": [
         ("Giveaways", ["giveaway create", "giveaway end", "giveaway reroll"]),
-        ("Tickets", ["tickets-setup", "categorytickets", "tickets-log"]),
-        ("Welcome & roles", ["welcomes-setup", "welcomes-on", "welcomes-off", "welcomes-button", "welcomes-button-remove", "welcomes-buttons-reset", "welcomes-settings", "autorol", "autorol-off", "addemojirole", "removeemojirole"]),
+        ("Tickets", ["tickets-setup", "categorytickets", "tickets-log", "tickets-settings"]),
+        ("Welcome & roles", ["welcomes-setup", "welcomes-on", "welcomes-off", "welcomes-button", "welcomes-button-remove", "welcomes-buttons-reset", "welcomes-settings", "autorol", "autorol-off", "autorol-settings", "addemojirole", "removeemojirole"]),
         ("Invites & goodbyes", ["invites-setup", "invites-off", "invites-settings", "despedidas-setup", "despedidas-off", "despedidas-settings"]),
-        ("Server name", ["servername", "servername-reset"]),
+        ("Server name", ["servername", "servername-reset", "servername-settings"]),
         ("Moderation", ["ban", "unban", "kick", "mute", "unmute"]),
-        ("Logs", ["modlog-setup", "modlog-events", "modlog-off"]),
+        ("Logs", ["modlog-setup", "modlog-events", "modlog-off", "modlog-settings"]),
         ("Protection", ["antiraid"]),
         ("Moderation & tools", ["poll", "bot-say", "embed", "emojisteal"]),
     ],
@@ -2774,30 +2778,6 @@ async def welcomes_buttons_reset(interaction: discord.Interaction):
     await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Default welcome buttons restored."), ephemeral=True)
 
 
-def build_welcome_layout(member: discord.Member) -> discord.ui.LayoutView:
-    title = discord.ui.TextDisplay(f"# {E('GE_member', '👋')} Welcome to {WELCOME_SERVER_NAME},")
-    head = discord.ui.Section(title, accessory=discord.ui.Thumbnail(member.display_avatar.url))
-    buttons = discord.ui.ActionRow(*[_welcome_button(btn) for btn in welcome_buttons_for(member.guild.id)])
-    container = discord.ui.Container(
-        head,
-        discord.ui.Separator(),
-        discord.ui.TextDisplay(
-            f"{member.mention}\n"
-            "«Thank you for joining Synex Protect. We're excited to have you as part of our community.»"
-        ),
-        discord.ui.TextDisplay(
-            f"-# {E('GE_member', '👤')} Member: {member.guild.member_count}\n"
-            f"-# {E('GE_rules', '📜')} Please read our rules and guidelines.\n"
-            f"-# {E('transfer', '🔁')} Stay tuned for upcoming updates."
-        ),
-        discord.ui.Separator(),
-        buttons,
-        accent_colour=STEEL,
-    )
-    view = discord.ui.LayoutView(timeout=None)
-    view.add_item(container)
-    return view
-
 GOODBYES_FILE = DATA_DIR / "goodbyes.json"
 goodbye_config: dict[str, int] = {}
 
@@ -2812,25 +2792,6 @@ def load_goodbyes() -> None:
 
 def save_goodbyes() -> None:
     GOODBYES_FILE.write_text(json.dumps(goodbye_config, indent=2), encoding="utf-8")
-
-
-def build_goodbye_layout(member: discord.Member) -> discord.ui.LayoutView:
-    gid = member.guild.id
-    head = discord.ui.Section(
-        discord.ui.TextDisplay(f"# {E('GE_member', '👋')} {tr(gid, 'goodbye.title', name=member.display_name)}"),
-        accessory=discord.ui.Thumbnail(member.display_avatar.url),
-    )
-    container = discord.ui.Container(
-        head,
-        discord.ui.Separator(),
-        discord.ui.TextDisplay(tr(gid, "goodbye.body", name=member.display_name, server=server_name(member.guild))),
-        discord.ui.Separator(),
-        discord.ui.TextDisplay(f"-# {E('GE_member', '👤')} {tr(gid, 'goodbye.members', n=member.guild.member_count)}"),
-        accent_colour=STEEL,
-    )
-    view = discord.ui.LayoutView(timeout=None)
-    view.add_item(container)
-    return view
 
 
 async def _send_goodbye(member: discord.Member) -> None:
@@ -3110,95 +3071,6 @@ def _channel_text(guild: discord.Guild, channel_id) -> str:
     return channel.mention if channel is not None else f"Missing channel (`{channel_id}`)"
 
 
-@bot.tree.command(name="welcomes-settings", description="Show the current welcome settings.")
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.guild_only()
-async def welcomes_settings(interaction: discord.Interaction):
-    gid = str(interaction.guild_id)
-    channel_value = welcome_config.get(gid, DEFAULT_WELCOME_CHANNEL_ID)
-    buttons = welcome_buttons_for(interaction.guild_id)
-    button_lines = "\n".join(f"{i}. **{b['label']}** · {b['url']}" for i, b in enumerate(buttons, 1)) or "None"
-    rows = [
-        ("Channel", _channel_text(interaction.guild, channel_value)),
-        ("Buttons", button_lines),
-        ("Custom buttons", "Yes" if gid in welcome_buttons_config else "No, using defaults"),
-    ]
-    await interaction.response.send_message(embed=_settings_embed("Welcome settings", rows), ephemeral=True)
-
-
-@bot.tree.command(name="invites-settings", description="Show the current invite tracking settings.")
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.guild_only()
-async def invites_settings(interaction: discord.Interaction):
-    gid = str(interaction.guild_id)
-    tracked = len(invites_store["counts"].get(gid, {}))
-    rows = [
-        ("Channel", _channel_text(interaction.guild, invites_store["channels"].get(gid))),
-        ("Inviters tracked", str(tracked)),
-    ]
-    await interaction.response.send_message(embed=_settings_embed("Invite settings", rows), ephemeral=True)
-
-
-@bot.tree.command(name="despedidas-settings", description="Show the current goodbye settings.")
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.guild_only()
-async def despedidas_settings(interaction: discord.Interaction):
-    rows = [("Channel", _channel_text(interaction.guild, goodbye_config.get(str(interaction.guild_id))))]
-    await interaction.response.send_message(embed=_settings_embed("Goodbye settings", rows), ephemeral=True)
-
-
-load_server_names()
-
-AUTOROLES_FILE = DATA_DIR / "autoroles.json"
-autoroles: dict[str, int] = {}
-
-
-def load_autoroles() -> None:
-    global autoroles
-    try:
-        autoroles = json.loads(AUTOROLES_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        autoroles = {}
-
-
-def save_autoroles() -> None:
-    AUTOROLES_FILE.write_text(json.dumps(autoroles, indent=2), encoding="utf-8")
-
-
-@bot.event
-async def on_member_join(member: discord.Member):
-    if member.bot:
-        await _log_bot_join(member)
-    else:
-        await _log_invite_join(member)
-    if await _antiraid_join(member):
-        return
-    role_id = autoroles.get(str(member.guild.id))
-    if role_id:
-        role = member.guild.get_role(role_id)
-        if role is not None and role < member.guild.me.top_role:
-            try:
-                await member.add_roles(role, reason="Auto role on join")
-            except discord.HTTPException as exc:
-                print(f"[autorol] could not give role: {exc}")
-
-    channel_id = welcome_config.get(str(member.guild.id), DEFAULT_WELCOME_CHANNEL_ID)
-    if not channel_id:
-        return
-    channel = member.guild.get_channel(channel_id)
-    if channel is None:
-        return
-    try:
-        await channel.send(
-            view=build_welcome_layout(member),
-            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-        )
-    except discord.HTTPException as exc:
-        print(f"[welcomes] could not send welcome: {exc}")
-
 @bot.tree.command(name="welcomes-setup", description="Send new member welcomes to this channel.")
 @app_commands.describe(channel="The channel where welcomes will be sent")
 @app_commands.default_permissions(manage_guild=True)
@@ -3237,6 +3109,22 @@ async def autorol_off(interaction: discord.Interaction):
     autoroles.pop(str(interaction.guild_id), None)
     save_autoroles()
     await interaction.response.send_message(embed=notice("Auto role is off."), ephemeral=True)
+
+
+@bot.tree.command(name="autorol-settings", description="Show the role given to new members.")
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.guild_only()
+async def autorol_settings(interaction: discord.Interaction):
+    role_id = autoroles.get(str(interaction.guild_id))
+    role = interaction.guild.get_role(role_id) if role_id else None
+    if role_id is None:
+        value = "Off"
+    elif role is None:
+        value = f"Missing role (`{role_id}`)"
+    else:
+        value = role.mention
+    await interaction.response.send_message(embed=_settings_embed("Auto role settings", [("Role", value)]), ephemeral=True)
 
 @bot.tree.command(name="welcomes-on", description="Turn welcomes back on in the default welcome channel.")
 @app_commands.default_permissions(manage_guild=True)
@@ -4921,6 +4809,970 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         title, color, fields = "Moved voice", CHARCOAL, [
             ("Member", _who(member)), ("From", before.channel.mention), ("To", after.channel.mention)]
     await _modlog(member.guild, "voice", title, color, member, fields)
+
+
+
+# ============================================================
+# Paneles de configuración: /welcomes-settings, /invites-settings, /despedidas-settings
+# ============================================================
+WELCOME_TEXTS_FILE = DATA_DIR / "welcome_texts.json"
+GOODBYE_TEXTS_FILE = DATA_DIR / "goodbye_texts.json"
+WELCOME_DEFAULT_BODY = "«Thank you for joining Synex Protect. We're excited to have you as part of our community.»"
+
+
+def _load_json_dict(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+welcome_text_config: dict[str, str] = _load_json_dict(WELCOME_TEXTS_FILE)
+goodbye_text_config: dict[str, str] = _load_json_dict(GOODBYE_TEXTS_FILE)
+
+
+def save_welcome_texts() -> None:
+    WELCOME_TEXTS_FILE.write_text(json.dumps(welcome_text_config, indent=2), encoding="utf-8")
+
+
+def save_goodbye_texts() -> None:
+    GOODBYE_TEXTS_FILE.write_text(json.dumps(goodbye_text_config, indent=2), encoding="utf-8")
+
+
+def render_text(text: str, **values) -> str:
+    for key, value in values.items():
+        text = text.replace("{" + key + "}", str(value))
+    return text
+
+
+class SettingsPanel(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                embed=error_notice("This panel belongs to someone else."), ephemeral=True)
+            return False
+        return True
+
+    def render(self, guild: discord.Guild) -> discord.Embed:
+        raise NotImplementedError
+
+    async def show(self, interaction: discord.Interaction) -> None:
+        await interaction.response.edit_message(embed=self.render(interaction.guild), view=self)
+
+    async def done(self, interaction: discord.Interaction, text: str) -> None:
+        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} {text}"), ephemeral=True)
+
+
+class ChannelPick(discord.ui.ChannelSelect):
+    def __init__(self, placeholder: str, on_pick):
+        super().__init__(placeholder=placeholder, channel_types=[discord.ChannelType.text],
+                         min_values=1, max_values=1)
+        self.on_pick = on_pick
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.on_pick(interaction, self.values[0].id)
+
+
+class TextModal(discord.ui.Modal):
+    def __init__(self, title: str, label: str, default: str | None, placeholder: str, save):
+        super().__init__(title=title)
+        self.save = save
+        self.field = discord.ui.TextInput(
+            label=label, style=discord.TextStyle.paragraph, default=default or None, required=False,
+            placeholder=placeholder[:100], max_length=1000,
+        )
+        self.add_item(self.field)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.save(interaction, self.field.value.strip())
+
+
+class WelcomeButtonModal(discord.ui.Modal, title="Welcome button"):
+    slot = discord.ui.TextInput(label="Position (1 to 5)", max_length=1, placeholder="1")
+    button_text = discord.ui.TextInput(label="Button text", max_length=80)
+    url = discord.ui.TextInput(label="Link (starts with https://)", max_length=300)
+    emoji = discord.ui.TextInput(label="Emoji (optional)", required=False, max_length=64)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            position = int(self.slot.value.strip())
+        except ValueError:
+            position = 0
+        if not 1 <= position <= WELCOME_BUTTON_LIMIT:
+            return await interaction.response.send_message(
+                embed=error_notice(f"Position must be between 1 and {WELCOME_BUTTON_LIMIT}."), ephemeral=True)
+        url = self.url.value.strip()
+        if not url.startswith("https://"):
+            return await interaction.response.send_message(
+                embed=error_notice("The link must start with https://"), ephemeral=True)
+        emoji_value = None
+        raw_emoji = self.emoji.value.strip()
+        if raw_emoji:
+            try:
+                discord.PartialEmoji.from_str(raw_emoji)
+            except (ValueError, TypeError):
+                return await interaction.response.send_message(
+                    embed=error_notice("That emoji is not valid."), ephemeral=True)
+            emoji_value = raw_emoji
+        buttons = welcome_buttons_for(interaction.guild_id)
+        if position > len(buttons) + 1:
+            return await interaction.response.send_message(
+                embed=error_notice(f"Fill slot {len(buttons) + 1} first."), ephemeral=True)
+        entry = {"label": self.button_text.value.strip(), "url": url, "emoji": emoji_value}
+        if position > len(buttons):
+            buttons.append(entry)
+        else:
+            buttons[position - 1] = entry
+        welcome_buttons_config[str(interaction.guild_id)] = buttons
+        save_welcome_buttons()
+        await interaction.response.send_message(
+            embed=notice(f"{E('true', '✅')} Welcome button {position} saved: **{entry['label']}**."), ephemeral=True)
+
+
+class WelcomeButtonRemoveModal(discord.ui.Modal, title="Remove welcome button"):
+    slot = discord.ui.TextInput(label="Position (1 to 5)", max_length=1, placeholder="1")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            position = int(self.slot.value.strip())
+        except ValueError:
+            position = 0
+        buttons = welcome_buttons_for(interaction.guild_id)
+        if not 1 <= position <= len(buttons):
+            return await interaction.response.send_message(
+                embed=error_notice("There is no button in that slot."), ephemeral=True)
+        if len(buttons) == 1:
+            return await interaction.response.send_message(
+                embed=error_notice("A welcome message needs at least one button."), ephemeral=True)
+        buttons.pop(position - 1)
+        welcome_buttons_config[str(interaction.guild_id)] = buttons
+        save_welcome_buttons()
+        await interaction.response.send_message(
+            embed=notice(f"{E('true', '✅')} Welcome button {position} removed."), ephemeral=True)
+
+
+# ---------- /invites-settings ----------
+def invites_embed(guild: discord.Guild) -> discord.Embed:
+    gid = str(guild.id)
+    counts = invites_store["counts"].get(gid, {})
+    top = sorted(counts.items(), key=lambda item: item[1], reverse=True)[:3]
+    top_text = "\n".join(f"{i}. <@{uid}> · **{n}**" for i, (uid, n) in enumerate(top, 1)) or "None yet"
+    rows = [
+        ("Channel", _channel_text(guild, invites_store["channels"].get(gid))),
+        ("Inviters tracked", str(len(counts))),
+        ("Top inviters", top_text),
+    ]
+    return _settings_embed("Invite settings", rows)
+
+
+class InvitesPanel(SettingsPanel):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+        self.add_item(ChannelPick("Pick the invite channel", self._set_channel))
+
+    def render(self, guild):
+        return invites_embed(guild)
+
+    async def _set_channel(self, interaction, channel_id: int):
+        invites_store["channels"][str(interaction.guild_id)] = channel_id
+        save_invites()
+        await self.show(interaction)
+
+    @discord.ui.button(label="Turn off", style=discord.ButtonStyle.danger, row=1)
+    async def turn_off(self, interaction, button):
+        invites_store["channels"].pop(str(interaction.guild_id), None)
+        save_invites()
+        await self.show(interaction)
+
+    @discord.ui.button(label="Reset counts", style=discord.ButtonStyle.danger, row=1)
+    async def reset_counts(self, interaction, button):
+        gid = str(interaction.guild_id)
+        invites_store["counts"].pop(gid, None)
+        invites_store["joins"].pop(gid, None)
+        save_invites()
+        await self.show(interaction)
+
+
+@bot.tree.command(name="invites-settings", description="Configure invite tracking: channel and counts.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def invites_settings(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        embed=invites_embed(interaction.guild), view=InvitesPanel(interaction.user.id), ephemeral=True)
+
+
+# Panel de configuración de tickets: /tickets-settings
+# ============================================================
+TICKET_SETTINGS_FILE = DATA_DIR / "tickets_settings.json"
+DEFAULT_TICKET_TYPES = copy.deepcopy(TICKET_TYPES)
+DEFAULT_PANEL_TEXT = PANEL_TEXT
+DEFAULT_TICKET_WELCOME_TITLE = WELCOME_TITLE
+DEFAULT_TICKET_WELCOME_BODY = WELCOME_BODY
+DEFAULT_TICKET_WELCOME_COLOR = WELCOME_COLOR
+
+
+def save_ticket_settings() -> None:
+    data = {
+        "logs": LOGS_CHANNEL_ID,
+        "transcripts": TRANSCRIPT_CHANNEL_ID,
+        "roles": SUPPORT_ROLE_IDS,
+        "max_open": MAX_OPEN_PER_USER,
+        "inactivity": INACTIVITY_HOURS,
+        "save_transcripts": SAVE_TRANSCRIPTS,
+        "dm_transcript": DM_TRANSCRIPT_ON_CLOSE,
+        "panel_text": PANEL_TEXT,
+        "panel_color": PANEL_COLOR,
+        "types": TICKET_TYPES,
+        "welcome_title": WELCOME_TITLE,
+        "welcome_body": WELCOME_BODY,
+        "welcome_color": WELCOME_COLOR,
+    }
+    TICKET_SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def set_ticket_setting(name: str, value) -> None:
+    globals()[name] = value
+    save_ticket_settings()
+
+
+def tickets_embed(guild: discord.Guild) -> discord.Embed:
+    category_id = ticket_data.get("category_id") or TICKET_CATEGORY_ID
+    category = guild.get_channel(category_id) if category_id else None
+    roles = [guild.get_role(rid) for rid in SUPPORT_ROLE_IDS]
+    rows = [
+        ("Category", f"**{category.name}**" if category else "Not set"),
+        ("Panel channel", _channel_text(guild, ticket_data["panel"].get("channel_id"))),
+        ("Logs channel", _channel_text(guild, LOGS_CHANNEL_ID)),
+        ("Transcripts channel", _channel_text(guild, TRANSCRIPT_CHANNEL_ID)),
+        ("Support roles", " ".join(r.mention for r in roles if r) or "None"),
+        ("Max open per user", str(MAX_OPEN_PER_USER)),
+        ("Inactivity close", f"{INACTIVITY_HOURS} h" if INACTIVITY_HOURS else "Off"),
+        ("Save transcripts", "On" if SAVE_TRANSCRIPTS else "Off"),
+        ("DM transcript on close", "On" if DM_TRANSCRIPT_ON_CLOSE else "Off"),
+        ("Ticket types", ", ".join(f"{t['label']} (`{t['key']}`)" for t in TICKET_TYPES) or "None"),
+        ("Open tickets", str(len(ticket_data["open"]))),
+    ]
+    return _settings_embed("Ticket settings", rows)
+
+
+class TicketTextModal(discord.ui.Modal):
+    def __init__(self, title: str, label: str, default: str | None, placeholder: str, setting: str,
+                 paragraph: bool = True, max_length: int = 1000):
+        super().__init__(title=title)
+        self.setting = setting
+        self.field = discord.ui.TextInput(
+            label=label, style=discord.TextStyle.paragraph if paragraph else discord.TextStyle.short,
+            default=default or None, required=True, placeholder=placeholder[:100], max_length=max_length,
+        )
+        self.add_item(self.field)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        text = self.field.value.strip()
+        if not text:
+            return await interaction.response.send_message(embed=error_notice("That can't be empty."), ephemeral=True)
+        set_ticket_setting(self.setting, text)
+        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Saved."), ephemeral=True)
+
+
+class TicketIntModal(discord.ui.Modal):
+    def __init__(self, title: str, label: str, default: int, low: int, high: int, setting: str):
+        super().__init__(title=title)
+        self.low, self.high, self.setting = low, high, setting
+        self.field = discord.ui.TextInput(label=label, default=str(default), max_length=4)
+        self.add_item(self.field)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            value = int(self.field.value.strip())
+        except ValueError:
+            value = None
+        if value is None or not self.low <= value <= self.high:
+            return await interaction.response.send_message(
+                embed=error_notice(f"Enter a number between {self.low} and {self.high}."), ephemeral=True)
+        set_ticket_setting(self.setting, value)
+        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Saved."), ephemeral=True)
+
+
+class TicketColorModal(discord.ui.Modal):
+    def __init__(self, title: str, default_name: str, setting: str):
+        super().__init__(title=title)
+        self.setting = setting
+        self.field = discord.ui.TextInput(
+            label="Color name or hex", default=default_name, max_length=20,
+            placeholder="Blue, Red, Silver... or #3B82F6")
+        self.add_item(self.field)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            code = parse_color(self.field.value)
+        except ValueError:
+            return await interaction.response.send_message(
+                embed=error_notice("Use a color name from the list or a hex code like #3B82F6."), ephemeral=True)
+        set_ticket_setting(self.setting, code)
+        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Color saved."), ephemeral=True)
+
+
+class TicketTypeModal(discord.ui.Modal):
+    label_in = discord.ui.TextInput(label="Name", max_length=50)
+    emoji_in = discord.ui.TextInput(label="Emoji", max_length=64, placeholder="🎫 or <:name:id>")
+    description_in = discord.ui.TextInput(label="Short description (menu)", max_length=100)
+    intro_in = discord.ui.TextInput(label="Intro text in the ticket", style=discord.TextStyle.paragraph, max_length=500)
+
+    def __init__(self, existing: dict | None):
+        super().__init__(title="Edit ticket type" if existing else "New ticket type")
+        self.existing = existing
+        if existing:
+            self.label_in.default = existing["label"]
+            self.emoji_in.default = existing["emoji"]
+            self.description_in.default = existing["description"]
+            self.intro_in.default = existing["intro"]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        label = self.label_in.value.strip()
+        emoji = self.emoji_in.value.strip()
+        try:
+            discord.PartialEmoji.from_str(emoji)
+        except (ValueError, TypeError):
+            return await interaction.response.send_message(embed=error_notice("That emoji is not valid."), ephemeral=True)
+        entry = {
+            "label": label,
+            "emoji": emoji,
+            "description": self.description_in.value.strip(),
+            "intro": self.intro_in.value.strip(),
+        }
+        if self.existing:
+            self.existing.update(entry)
+        else:
+            used = {t["key"] for t in TICKET_TYPES}
+            base = slugify(label)
+            key, n = base, 2
+            while key in used:
+                key = f"{base}-{n}"
+                n += 1
+            TICKET_TYPES.append({"key": key, **entry})
+        save_ticket_settings()
+        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Ticket type **{label}** saved."), ephemeral=True)
+
+
+class TicketTypeRemoveModal(discord.ui.Modal, title="Remove ticket type"):
+    key_in = discord.ui.TextInput(label="Type key to remove", max_length=50, placeholder="support, buy, giveaways...")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        key = self.key_in.value.strip().lower()
+        target = ticket_type(key)
+        if target is None:
+            return await interaction.response.send_message(embed=error_notice("There is no type with that key."), ephemeral=True)
+        if len(TICKET_TYPES) <= 1:
+            return await interaction.response.send_message(embed=error_notice("The panel needs at least one type."), ephemeral=True)
+        TICKET_TYPES.remove(target)
+        save_ticket_settings()
+        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Type **{target['label']}** removed."), ephemeral=True)
+
+
+class TicketChannelPick(discord.ui.ChannelSelect):
+    def __init__(self, placeholder: str, channel_types, setter, row: int):
+        super().__init__(placeholder=placeholder, channel_types=channel_types, min_values=0, max_values=1, row=row)
+        self.setter = setter
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.setter(interaction, self.values[0].id if self.values else None)
+
+
+class TicketRolePick(discord.ui.RoleSelect):
+    def __init__(self, setter, row: int):
+        super().__init__(placeholder="Pick the support roles (empty = none)", min_values=0, max_values=10, row=row)
+        self.setter = setter
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.setter(interaction, [r.id for r in self.values])
+
+
+class TicketTypeSelect(discord.ui.Select):
+    def __init__(self, row: int):
+        options = [discord.SelectOption(label=t["label"], value=t["key"], description=t["description"][:100],
+                                        emoji=t["emoji"]) for t in TICKET_TYPES][:25]
+        super().__init__(placeholder="Pick a type to edit…", options=options, min_values=1, max_values=1, row=row)
+
+    async def callback(self, interaction: discord.Interaction):
+        target = ticket_type(self.values[0])
+        if target is None:
+            return await interaction.response.send_message(embed=error_notice("That type no longer exists."), ephemeral=True)
+        await interaction.response.send_modal(TicketTypeModal(target))
+
+
+class TicketsMainPanel(SettingsPanel):
+    def render(self, guild):
+        return tickets_embed(guild)
+
+    @discord.ui.button(label="Channels", style=discord.ButtonStyle.primary, row=0)
+    async def channels(self, interaction, button):
+        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketChannelsPanel(self.owner_id))
+
+    @discord.ui.button(label="Support roles", style=discord.ButtonStyle.primary, row=0)
+    async def roles(self, interaction, button):
+        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketRolesPanel(self.owner_id))
+
+    @discord.ui.button(label="Limits & transcripts", style=discord.ButtonStyle.primary, row=0)
+    async def limits(self, interaction, button):
+        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketLimitsPanel(self.owner_id))
+
+    @discord.ui.button(label="Panel", style=discord.ButtonStyle.primary, row=0)
+    async def panel(self, interaction, button):
+        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketPanelPanel(self.owner_id))
+
+    @discord.ui.button(label="Ticket types", style=discord.ButtonStyle.primary, row=0)
+    async def types(self, interaction, button):
+        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketTypesPanel(self.owner_id))
+
+    @discord.ui.button(label="Welcome message", style=discord.ButtonStyle.primary, row=1)
+    async def welcome(self, interaction, button):
+        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketWelcomePanel(self.owner_id))
+
+
+class TicketSubPanel(SettingsPanel):
+    title = "Ticket settings"
+
+    def render(self, guild):
+        embed = tickets_embed(guild)
+        embed.title = self.title
+        return embed
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=4)
+    async def back(self, interaction, button):
+        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketsMainPanel(self.owner_id))
+
+
+class TicketChannelsPanel(TicketSubPanel):
+    title = "Ticket channels"
+
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+        self.add_item(TicketChannelPick("Ticket category (clear to use default)", [discord.ChannelType.category],
+                                        self._set_category, row=0))
+        self.add_item(TicketChannelPick("Logs channel (clear to turn off)", [discord.ChannelType.text],
+                                        self._set_logs, row=1))
+        self.add_item(TicketChannelPick("Transcripts channel (clear to turn off)", [discord.ChannelType.text],
+                                        self._set_transcripts, row=2))
+
+    async def _set_category(self, interaction, channel_id):
+        ticket_data["category_id"] = channel_id
+        save_tickets()
+        await self.show(interaction)
+
+    async def _set_logs(self, interaction, channel_id):
+        set_ticket_setting("LOGS_CHANNEL_ID", channel_id)
+        await self.show(interaction)
+
+    async def _set_transcripts(self, interaction, channel_id):
+        set_ticket_setting("TRANSCRIPT_CHANNEL_ID", channel_id)
+        await self.show(interaction)
+
+
+class TicketRolesPanel(TicketSubPanel):
+    title = "Support roles"
+
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+        self.add_item(TicketRolePick(self._set_roles, row=0))
+
+    async def _set_roles(self, interaction, role_ids):
+        set_ticket_setting("SUPPORT_ROLE_IDS", role_ids)
+        await self.show(interaction)
+
+
+class TicketLimitsPanel(TicketSubPanel):
+    title = "Limits & transcripts"
+
+    @discord.ui.button(label="Max open per user", style=discord.ButtonStyle.primary, row=0)
+    async def max_open(self, interaction, button):
+        await interaction.response.send_modal(TicketIntModal(
+            "Max open tickets", "Tickets per user (1 to 10)", MAX_OPEN_PER_USER, 1, 10, "MAX_OPEN_PER_USER"))
+
+    @discord.ui.button(label="Inactivity close", style=discord.ButtonStyle.primary, row=0)
+    async def inactivity(self, interaction, button):
+        await interaction.response.send_modal(TicketIntModal(
+            "Inactivity close", "Hours without messages (0 = off)", INACTIVITY_HOURS, 0, 720, "INACTIVITY_HOURS"))
+
+    @discord.ui.button(label="Toggle transcripts", style=discord.ButtonStyle.secondary, row=1)
+    async def toggle_transcripts(self, interaction, button):
+        set_ticket_setting("SAVE_TRANSCRIPTS", not SAVE_TRANSCRIPTS)
+        await self.show(interaction)
+
+    @discord.ui.button(label="Toggle DM transcript", style=discord.ButtonStyle.secondary, row=1)
+    async def toggle_dm(self, interaction, button):
+        set_ticket_setting("DM_TRANSCRIPT_ON_CLOSE", not DM_TRANSCRIPT_ON_CLOSE)
+        await self.show(interaction)
+
+
+class TicketPanelPanel(TicketSubPanel):
+    title = "Ticket panel"
+
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+        self.add_item(TicketChannelPick("Post the panel in… (posts right away)", [discord.ChannelType.text],
+                                        self._post, row=1))
+
+    async def _post(self, interaction, channel_id):
+        if channel_id is None:
+            return await interaction.response.send_message(embed=error_notice("Pick a channel."), ephemeral=True)
+        channel = interaction.guild.get_channel(channel_id)
+        await post_panel(channel, interaction.guild)
+        await self.done(interaction, f"Panel posted in {channel.mention}.")
+
+    @discord.ui.button(label="Edit panel text", style=discord.ButtonStyle.primary, row=0)
+    async def edit_text(self, interaction, button):
+        await interaction.response.send_modal(TicketTextModal(
+            "Panel text", "Text shown on the panel", PANEL_TEXT, "Use {member} and {star}", "PANEL_TEXT"))
+
+    @discord.ui.button(label="Panel color", style=discord.ButtonStyle.primary, row=0)
+    async def color(self, interaction, button):
+        await interaction.response.send_modal(TicketColorModal("Panel color", "Blue", "PANEL_COLOR"))
+
+    @discord.ui.button(label="Reset panel text", style=discord.ButtonStyle.secondary, row=2)
+    async def reset_text(self, interaction, button):
+        set_ticket_setting("PANEL_TEXT", DEFAULT_PANEL_TEXT)
+        await self.show(interaction)
+
+    @discord.ui.button(label="Refresh panel", style=discord.ButtonStyle.secondary, row=2)
+    async def refresh(self, interaction, button):
+        channel_id = ticket_data["panel"].get("channel_id")
+        channel = interaction.guild.get_channel(channel_id) if channel_id else None
+        if channel is None:
+            return await interaction.response.send_message(
+                embed=error_notice("There is no panel yet. Post one with the option above."), ephemeral=True)
+        await post_panel(channel, interaction.guild)
+        await self.done(interaction, "Panel refreshed with the current types and text.")
+
+
+class TicketTypesPanel(TicketSubPanel):
+    title = "Ticket types"
+
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+        self.add_item(TicketTypeSelect(row=0))
+
+    @discord.ui.button(label="Add type", style=discord.ButtonStyle.primary, row=1)
+    async def add_type(self, interaction, button):
+        await interaction.response.send_modal(TicketTypeModal(None))
+
+    @discord.ui.button(label="Remove type", style=discord.ButtonStyle.danger, row=1)
+    async def remove_type(self, interaction, button):
+        await interaction.response.send_modal(TicketTypeRemoveModal())
+
+    @discord.ui.button(label="Reset types", style=discord.ButtonStyle.secondary, row=1)
+    async def reset_types(self, interaction, button):
+        TICKET_TYPES[:] = copy.deepcopy(DEFAULT_TICKET_TYPES)
+        save_ticket_settings()
+        await self.show(interaction)
+
+
+class TicketWelcomePanel(TicketSubPanel):
+    title = "Ticket welcome message"
+
+    @discord.ui.button(label="Edit title", style=discord.ButtonStyle.primary, row=0)
+    async def edit_title(self, interaction, button):
+        await interaction.response.send_modal(TicketTextModal(
+            "Welcome title", "Title", WELCOME_TITLE, "Use {welcome} and {username}", "WELCOME_TITLE",
+            paragraph=False, max_length=200))
+
+    @discord.ui.button(label="Edit body", style=discord.ButtonStyle.primary, row=0)
+    async def edit_body(self, interaction, button):
+        await interaction.response.send_modal(TicketTextModal(
+            "Welcome body", "Body text",
+            WELCOME_BODY, "Use {server}, {intro}, {option}, {number} and {opened}", "WELCOME_BODY"))
+
+    @discord.ui.button(label="Color", style=discord.ButtonStyle.secondary, row=0)
+    async def color(self, interaction, button):
+        await interaction.response.send_modal(TicketColorModal("Welcome color", "Gray", "WELCOME_COLOR"))
+
+    @discord.ui.button(label="Reset", style=discord.ButtonStyle.secondary, row=1)
+    async def reset(self, interaction, button):
+        set_ticket_setting("WELCOME_TITLE", DEFAULT_TICKET_WELCOME_TITLE)
+        set_ticket_setting("WELCOME_BODY", DEFAULT_TICKET_WELCOME_BODY)
+        set_ticket_setting("WELCOME_COLOR", DEFAULT_TICKET_WELCOME_COLOR)
+        await self.show(interaction)
+
+
+# Cargar lo guardado desde el panel al iniciar el bot
+_saved_tickets = _load_json_dict(TICKET_SETTINGS_FILE)
+if _saved_tickets:
+    LOGS_CHANNEL_ID = _saved_tickets.get("logs", LOGS_CHANNEL_ID)
+    TRANSCRIPT_CHANNEL_ID = _saved_tickets.get("transcripts", TRANSCRIPT_CHANNEL_ID)
+    SUPPORT_ROLE_IDS = list(_saved_tickets.get("roles", SUPPORT_ROLE_IDS))
+    MAX_OPEN_PER_USER = _saved_tickets.get("max_open", MAX_OPEN_PER_USER)
+    INACTIVITY_HOURS = _saved_tickets.get("inactivity", INACTIVITY_HOURS)
+    SAVE_TRANSCRIPTS = _saved_tickets.get("save_transcripts", SAVE_TRANSCRIPTS)
+    DM_TRANSCRIPT_ON_CLOSE = _saved_tickets.get("dm_transcript", DM_TRANSCRIPT_ON_CLOSE)
+    PANEL_TEXT = _saved_tickets.get("panel_text", PANEL_TEXT)
+    PANEL_COLOR = _saved_tickets.get("panel_color", PANEL_COLOR)
+    if _saved_tickets.get("types"):
+        TICKET_TYPES[:] = _saved_tickets["types"]
+    WELCOME_TITLE = _saved_tickets.get("welcome_title", WELCOME_TITLE)
+    WELCOME_BODY = _saved_tickets.get("welcome_body", WELCOME_BODY)
+    WELCOME_COLOR = _saved_tickets.get("welcome_color", WELCOME_COLOR)
+
+
+@bot.tree.command(name="tickets-settings", description="Configure everything about tickets from one panel.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def tickets_settings(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        embed=tickets_embed(interaction.guild), view=TicketsMainPanel(interaction.user.id), ephemeral=True)
+
+
+
+# ============================================================
+# Bienvenidas y despedidas: estilo completo desde /welcomes-settings y /despedidas-settings
+# ============================================================
+WELCOME_STYLE_FILE = DATA_DIR / "welcome_style.json"
+GOODBYE_STYLE_FILE = DATA_DIR / "goodbye_style.json"
+welcome_style: dict[str, dict] = _load_json_dict(WELCOME_STYLE_FILE)
+goodbye_style: dict[str, dict] = _load_json_dict(GOODBYE_STYLE_FILE)
+
+# Migrar los textos personalizados de la versión anterior
+for _gid, _text in welcome_text_config.items():
+    welcome_style.setdefault(_gid, {}).setdefault("body", _text)
+for _gid, _text in goodbye_text_config.items():
+    goodbye_style.setdefault(_gid, {}).setdefault("body", _text)
+
+
+def save_welcome_style() -> None:
+    WELCOME_STYLE_FILE.write_text(json.dumps(welcome_style, indent=2), encoding="utf-8")
+
+
+def save_goodbye_style() -> None:
+    GOODBYE_STYLE_FILE.write_text(json.dumps(goodbye_style, indent=2), encoding="utf-8")
+
+
+def _style_store(kind: str) -> dict:
+    return welcome_style if kind == "welcome" else goodbye_style
+
+
+def _save_style(kind: str) -> None:
+    save_welcome_style() if kind == "welcome" else save_goodbye_style()
+
+
+def _footer_block(text: str) -> str:
+    return "\n".join(f"-# {line}" for line in text.splitlines() if line.strip())
+
+
+def _assemble(head_text: str, st: dict, body: str, footer: str, buttons=None, avatar_url: str | None = None) -> discord.ui.LayoutView:
+    thumb = st.get("thumbnail", "avatar")
+    children: list = []
+    head = discord.ui.TextDisplay(head_text)
+    if thumb == "none":
+        children.append(head)
+    else:
+        url = avatar_url if thumb == "avatar" else thumb
+        children.append(discord.ui.Section(head, accessory=discord.ui.Thumbnail(url)))
+    if st.get("banner"):
+        children.append(discord.ui.MediaGallery(discord.MediaGalleryItem(st["banner"])))
+    children += [discord.ui.Separator(), discord.ui.TextDisplay(body), discord.ui.Separator(),
+                 discord.ui.TextDisplay(footer)]
+    if buttons:
+        children += [discord.ui.Separator(), discord.ui.ActionRow(*buttons)]
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(*children, accent_colour=st.get("color") or STEEL))
+    return view
+
+
+def build_welcome_layout(member: discord.Member) -> discord.ui.LayoutView:
+    gid = str(member.guild.id)
+    st = welcome_style.get(gid, {})
+    values = dict(member=member.mention, name=member.display_name, server=WELCOME_SERVER_NAME,
+                  count=member.guild.member_count)
+    title = (render_text(st["title"], **values) if st.get("title")
+             else f"# {E('GE_member', '👋')} Welcome to {WELCOME_SERVER_NAME},")
+    body = (render_text(st["body"], **values) if st.get("body")
+            else f"{member.mention}\n{WELCOME_DEFAULT_BODY}")
+    if st.get("footer"):
+        footer = _footer_block(render_text(st["footer"], **values))
+    else:
+        footer = _footer_block(
+            f"{E('GE_member', '👤')} Member: {member.guild.member_count}\n"
+            f"{E('GE_rules', '📜')} Please read our rules and guidelines.\n"
+            f"{E('transfer', '🔁')} Stay tuned for upcoming updates."
+        )
+    buttons = [_welcome_button(btn) for btn in welcome_buttons_for(member.guild.id)]
+    return _assemble(title, st, body, footer, buttons=buttons, avatar_url=member.display_avatar.url)
+
+
+def build_goodbye_layout(member: discord.Member) -> discord.ui.LayoutView:
+    guild = member.guild
+    gid = str(guild.id)
+    st = goodbye_style.get(gid, {})
+    values = dict(member=member.mention, name=member.display_name, server=server_name(guild),
+                  count=guild.member_count)
+    title = (render_text(st["title"], **values) if st.get("title")
+             else f"# {E('GE_member', '👋')} {tr(guild.id, 'goodbye.title', name=member.display_name)}")
+    body = (render_text(st["body"], **values) if st.get("body")
+            else tr(guild.id, "goodbye.body", name=member.display_name, server=server_name(guild)))
+    footer = (_footer_block(render_text(st["footer"], **values)) if st.get("footer")
+              else f"-# {E('GE_member', '👤')} {tr(guild.id, 'goodbye.members', n=guild.member_count)}")
+    return _assemble(title, st, body, footer, avatar_url=member.display_avatar.url)
+
+
+class StyleTextModal(discord.ui.Modal):
+    def __init__(self, kind: str, gid: str):
+        super().__init__(title=f"{'Welcome' if kind == 'welcome' else 'Goodbye'} text")
+        self.kind, self.gid = kind, gid
+        st = _style_store(kind).get(gid, {})
+        self.title_in = discord.ui.TextInput(label="Title (markdown allowed)", required=False, max_length=200,
+                                             default=st.get("title"), placeholder="{member} {server} {name} {count}")
+        self.body_in = discord.ui.TextInput(label="Body", style=discord.TextStyle.paragraph, required=False,
+                                            max_length=1000, default=st.get("body"),
+                                            placeholder="Leave empty for the default text")
+        self.footer_in = discord.ui.TextInput(label="Footer (one line each)", style=discord.TextStyle.paragraph,
+                                              required=False, max_length=500, default=st.get("footer"),
+                                              placeholder="Member: {count}")
+        for item in (self.title_in, self.body_in, self.footer_in):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        st = _style_store(self.kind).setdefault(self.gid, {})
+        for key, item in (("title", self.title_in), ("body", self.body_in), ("footer", self.footer_in)):
+            value = item.value.strip()
+            if value:
+                st[key] = value
+            else:
+                st.pop(key, None)
+        _save_style(self.kind)
+        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Text saved."), ephemeral=True)
+
+
+class StyleImagesModal(discord.ui.Modal, title="Images"):
+    thumbnail_in = discord.ui.TextInput(label="Thumbnail: avatar, none, or https link", required=False, max_length=300,
+                                        placeholder="avatar")
+    banner_in = discord.ui.TextInput(label="Banner image: https link (empty = none)", required=False, max_length=300)
+
+    def __init__(self, kind: str, gid: str):
+        super().__init__()
+        self.kind, self.gid = kind, gid
+        st = _style_store(kind).get(gid, {})
+        self.thumbnail_in.default = st.get("thumbnail") if st.get("thumbnail") not in (None, "avatar") else None
+        self.banner_in.default = st.get("banner")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        thumb = self.thumbnail_in.value.strip().lower() or "avatar"
+        banner = self.banner_in.value.strip()
+        if thumb not in ("avatar", "none") and not thumb.startswith("https://"):
+            return await interaction.response.send_message(
+                embed=error_notice("The thumbnail must be `avatar`, `none` or an https link."), ephemeral=True)
+        if banner and not banner.startswith("https://"):
+            return await interaction.response.send_message(
+                embed=error_notice("The banner must be an https link."), ephemeral=True)
+        st = _style_store(self.kind).setdefault(self.gid, {})
+        st["thumbnail"] = thumb
+        if banner:
+            st["banner"] = banner
+        else:
+            st.pop("banner", None)
+        _save_style(self.kind)
+        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Images saved."), ephemeral=True)
+
+
+class StyleColorModal(discord.ui.Modal, title="Color"):
+    color_in = discord.ui.TextInput(label="Color name or hex (empty = default)", required=False, max_length=20,
+                                    placeholder="Blue, Red, Silver... or #3B82F6")
+
+    def __init__(self, kind: str, gid: str):
+        super().__init__()
+        self.kind, self.gid = kind, gid
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.color_in.value.strip()
+        st = _style_store(self.kind).setdefault(self.gid, {})
+        if raw:
+            try:
+                st["color"] = parse_color(raw)
+            except ValueError:
+                return await interaction.response.send_message(
+                    embed=error_notice("Use a color name from the list or a hex code like #3B82F6."), ephemeral=True)
+        else:
+            st.pop("color", None)
+        _save_style(self.kind)
+        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Color saved."), ephemeral=True)
+
+
+def welcomes_embed(guild: discord.Guild) -> discord.Embed:
+    gid = str(guild.id)
+    st = welcome_style.get(gid, {})
+    buttons = welcome_buttons_for(guild.id)
+    button_lines = "\n".join(f"{i}. **{b['label']}** · {b['url']}" for i, b in enumerate(buttons, 1)) or "None"
+    rows = [
+        ("Channel", _channel_text(guild, welcome_config.get(gid, DEFAULT_WELCOME_CHANNEL_ID))),
+        ("Title", "Custom" if st.get("title") else "Default"),
+        ("Body", "Custom" if st.get("body") else "Default"),
+        ("Footer", "Custom" if st.get("footer") else "Default"),
+        ("Thumbnail", st.get("thumbnail", "avatar")),
+        ("Banner", st.get("banner", "None")),
+        ("Color", f"#{st['color']:06X}" if st.get("color") else "Default"),
+        ("Buttons", button_lines),
+    ]
+    return _settings_embed("Welcome settings", rows)
+
+
+def goodbyes_embed(guild: discord.Guild) -> discord.Embed:
+    gid = str(guild.id)
+    st = goodbye_style.get(gid, {})
+    rows = [
+        ("Channel", _channel_text(guild, goodbye_config.get(gid))),
+        ("Title", "Custom" if st.get("title") else "Default"),
+        ("Body", "Custom" if st.get("body") else "Default"),
+        ("Footer", "Custom" if st.get("footer") else "Default"),
+        ("Thumbnail", st.get("thumbnail", "avatar")),
+        ("Banner", st.get("banner", "None")),
+        ("Color", f"#{st['color']:06X}" if st.get("color") else "Default"),
+    ]
+    return _settings_embed("Goodbye settings", rows)
+
+
+class WelcomeButtonsPanel(SettingsPanel):
+    def render(self, guild):
+        embed = welcomes_embed(guild)
+        embed.title = "Welcome buttons"
+        return embed
+
+    @discord.ui.button(label="Add / edit button", style=discord.ButtonStyle.primary, row=0)
+    async def add_button(self, interaction, button):
+        await interaction.response.send_modal(WelcomeButtonModal())
+
+    @discord.ui.button(label="Remove button", style=discord.ButtonStyle.secondary, row=0)
+    async def remove_button(self, interaction, button):
+        await interaction.response.send_modal(WelcomeButtonRemoveModal())
+
+    @discord.ui.button(label="Reset buttons", style=discord.ButtonStyle.secondary, row=0)
+    async def reset_buttons(self, interaction, button):
+        welcome_buttons_config.pop(str(interaction.guild_id), None)
+        save_welcome_buttons()
+        await self.show(interaction)
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction, button):
+        await interaction.response.edit_message(embed=welcomes_embed(interaction.guild),
+                                                view=WelcomesPanel(self.owner_id))
+
+
+class WelcomesPanel(SettingsPanel):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+        self.add_item(ChannelPick("Pick the welcome channel", self._set_channel))
+
+    def render(self, guild):
+        return welcomes_embed(guild)
+
+    async def _set_channel(self, interaction, channel_id: int):
+        welcome_config[str(interaction.guild_id)] = channel_id
+        save_welcomes()
+        await self.show(interaction)
+
+    @discord.ui.button(label="Turn off", style=discord.ButtonStyle.danger, row=1)
+    async def turn_off(self, interaction, button):
+        welcome_config[str(interaction.guild_id)] = None
+        save_welcomes()
+        await self.show(interaction)
+
+    @discord.ui.button(label="Default channel", style=discord.ButtonStyle.secondary, row=1)
+    async def default_channel(self, interaction, button):
+        welcome_config.pop(str(interaction.guild_id), None)
+        save_welcomes()
+        await self.show(interaction)
+
+    @discord.ui.button(label="Text", style=discord.ButtonStyle.primary, row=1)
+    async def text(self, interaction, button):
+        await interaction.response.send_modal(StyleTextModal("welcome", str(interaction.guild_id)))
+
+    @discord.ui.button(label="Images", style=discord.ButtonStyle.primary, row=1)
+    async def images(self, interaction, button):
+        await interaction.response.send_modal(StyleImagesModal("welcome", str(interaction.guild_id)))
+
+    @discord.ui.button(label="Color", style=discord.ButtonStyle.primary, row=1)
+    async def color(self, interaction, button):
+        await interaction.response.send_modal(StyleColorModal("welcome", str(interaction.guild_id)))
+
+    @discord.ui.button(label="Buttons", style=discord.ButtonStyle.primary, row=2)
+    async def buttons(self, interaction, button):
+        await interaction.response.edit_message(embed=welcomes_embed(interaction.guild),
+                                                view=WelcomeButtonsPanel(self.owner_id))
+
+    @discord.ui.button(label="Preview", style=discord.ButtonStyle.secondary, row=2)
+    async def preview(self, interaction, button):
+        await interaction.response.send_message(view=build_welcome_layout(interaction.user), ephemeral=True)
+
+    @discord.ui.button(label="Reset all", style=discord.ButtonStyle.danger, row=2)
+    async def reset_all(self, interaction, button):
+        gid = str(interaction.guild_id)
+        welcome_style.pop(gid, None)
+        save_welcome_style()
+        welcome_buttons_config.pop(gid, None)
+        save_welcome_buttons()
+        await self.show(interaction)
+
+
+class GoodbyesPanel(SettingsPanel):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+        self.add_item(ChannelPick("Pick the goodbye channel", self._set_channel))
+
+    def render(self, guild):
+        return goodbyes_embed(guild)
+
+    async def _set_channel(self, interaction, channel_id: int):
+        goodbye_config[str(interaction.guild_id)] = channel_id
+        save_goodbyes()
+        await self.show(interaction)
+
+    @discord.ui.button(label="Turn off", style=discord.ButtonStyle.danger, row=1)
+    async def turn_off(self, interaction, button):
+        goodbye_config.pop(str(interaction.guild_id), None)
+        save_goodbyes()
+        await self.show(interaction)
+
+    @discord.ui.button(label="Text", style=discord.ButtonStyle.primary, row=1)
+    async def text(self, interaction, button):
+        await interaction.response.send_modal(StyleTextModal("goodbye", str(interaction.guild_id)))
+
+    @discord.ui.button(label="Images", style=discord.ButtonStyle.primary, row=1)
+    async def images(self, interaction, button):
+        await interaction.response.send_modal(StyleImagesModal("goodbye", str(interaction.guild_id)))
+
+    @discord.ui.button(label="Color", style=discord.ButtonStyle.primary, row=1)
+    async def color(self, interaction, button):
+        await interaction.response.send_modal(StyleColorModal("goodbye", str(interaction.guild_id)))
+
+    @discord.ui.button(label="Preview", style=discord.ButtonStyle.secondary, row=2)
+    async def preview(self, interaction, button):
+        await interaction.response.send_message(view=build_goodbye_layout(interaction.user), ephemeral=True)
+
+    @discord.ui.button(label="Reset all", style=discord.ButtonStyle.danger, row=2)
+    async def reset_all(self, interaction, button):
+        goodbye_style.pop(str(interaction.guild_id), None)
+        save_goodbye_style()
+        await self.show(interaction)
+
+
+@bot.tree.command(name="welcomes-settings", description="Configure welcomes: channel, text, images, color and buttons.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def welcomes_settings(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        embed=welcomes_embed(interaction.guild), view=WelcomesPanel(interaction.user.id), ephemeral=True)
+
+
+@bot.tree.command(name="despedidas-settings", description="Configure goodbyes: channel, text, images and color.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def despedidas_settings(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        embed=goodbyes_embed(interaction.guild), view=GoodbyesPanel(interaction.user.id), ephemeral=True)
 
 
 if __name__ == "__main__":
