@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.11.6"
+BOT_VERSION = "1.12.0"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -205,7 +205,18 @@ def fixed_emoji(name: str, emoji_id: int, animated: bool = False) -> str:
     return f"<{'a' if animated else ''}:{name}:{emoji_id}>"
 
 
-def build_serverinfo_embed(guild: discord.Guild) -> discord.Embed:
+SERVER_SECTIONS = [
+    ("Server", "server", "Overview of the server"),
+    ("Roles", "roles", "All roles in this server"),
+    ("Emojis", "emojis", "All custom emojis in this server"),
+]
+
+
+def _cap(text: str, limit: int = 3000) -> str:
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + " …"
+
+
+def server_overview_text(guild: discord.Guild) -> str:
     roles = [r for r in guild.roles if not r.is_default()]
     humans = sum(1 for m in guild.members if not m.bot)
     bots = sum(1 for m in guild.members if m.bot)
@@ -217,7 +228,6 @@ def build_serverinfo_embed(guild: discord.Guild) -> discord.Embed:
     hashtag = E("white_hashtag2", "#️⃣")
     star = fixed_emoji("estrella_vacia", 1568200011660140544)
     logo = fixed_emoji("synexprotect", 1568001429258641661)
-
     lines = [
         f"{crown} **Owner**\n{guild.owner.mention if guild.owner else 'Unknown'}",
         f"{boosts} **Server Boosts**\nLevel {guild.premium_tier} • {guild.premium_subscription_count} Boosts {boost_emoji}",
@@ -227,16 +237,59 @@ def build_serverinfo_embed(guild: discord.Guild) -> discord.Embed:
         f"🕓 **Created**\n{discord.utils.format_dt(guild.created_at, 'D')} • {discord.utils.format_dt(guild.created_at, 'R')}",
         f"{logo} **Server ID**\n`{guild.id}`",
     ]
-    embed = discord.Embed(
-        title=f"{logo} Server Information",
-        description="\n\n".join(lines),
-        color=CHARCOAL,
-        timestamp=datetime.now(timezone.utc),
+    return "\n\n".join(lines)
+
+
+def server_roles_text(guild: discord.Guild) -> str:
+    roles = [r for r in reversed(guild.roles) if not r.is_default()]
+    body = " ".join(r.mention for r in roles) or "None"
+    return f"**Roles · {len(roles)}**\n{_cap(body)}"
+
+
+def server_emojis_text(guild: discord.Guild) -> str:
+    body = " ".join(str(e) for e in guild.emojis) or "None"
+    return f"**Emojis · {len(guild.emojis)}**\n{_cap(body)}"
+
+
+def build_server_layout(guild: discord.Guild, section: str = "server") -> discord.ui.LayoutView:
+    logo = fixed_emoji("synexprotect", 1568001429258641661)
+    body = {
+        "server": server_overview_text,
+        "roles": server_roles_text,
+        "emojis": server_emojis_text,
+    }.get(section, server_overview_text)(guild)
+
+    title = discord.ui.TextDisplay(f"### {logo} Server Information")
+    head = (discord.ui.Section(title, accessory=discord.ui.Thumbnail(guild.icon.url))
+            if guild.icon else title)
+
+    select = discord.ui.Select(
+        placeholder="Choose a section…",
+        min_values=1,
+        max_values=1,
+        options=[
+            discord.SelectOption(label=label, value=value, description=desc, default=(value == section))
+            for label, value, desc in SERVER_SECTIONS
+        ],
     )
-    if guild.icon:
-        embed.set_thumbnail(url=guild.icon.url)
-    embed.set_footer(text="Synex Protect • Server Information")
-    return embed
+
+    async def on_pick(interaction: discord.Interaction):
+        await interaction.response.edit_message(view=build_server_layout(guild, select.values[0]))
+
+    select.callback = on_pick
+
+    container = discord.ui.Container(
+        head,
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(body),
+        discord.ui.Separator(),
+        discord.ui.ActionRow(select),
+        discord.ui.TextDisplay("-# Synex Protect • Server Information"),
+        accent_colour=CHARCOAL,
+    )
+    view = discord.ui.LayoutView(timeout=600)
+    view.add_item(container)
+    return view
 
 
 def build_userinfo_embed(member: discord.Member) -> discord.Embed:
@@ -674,13 +727,13 @@ async def ping_prefix(ctx: commands.Context):
 @bot.tree.command(name="serverinfo", description="Show statistics and information about this server.")
 @app_commands.guild_only()
 async def serverinfo(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=build_serverinfo_embed(interaction.guild))
+    await interaction.response.send_message(view=build_server_layout(interaction.guild))
 
 
 @bot.command(name="server")
 @commands.guild_only()
 async def server_prefix(ctx: commands.Context):
-    await ctx.send(embed=build_serverinfo_embed(ctx.guild))
+    await ctx.send(view=build_server_layout(ctx.guild))
 
 
 # ---------------------------------------------------------------- /userinfo (prefix: !user)
