@@ -20,7 +20,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.12.2"
+BOT_VERSION = "1.13.0"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -713,27 +713,47 @@ async def avatar_prefix(ctx: commands.Context, member: Optional[discord.User] = 
     await ctx.send(embed=embed, view=view)
 
 PUBLIC_COMMANDS = [
-    ("ping", "Show the bot's current latency.", "/ping  ·  !ping"),
-    ("serverinfo", "Statistics and information about this server.", "/serverinfo  ·  !server"),
-    ("userinfo", "Details about a member, including roles.", "/userinfo [member]  ·  !user [member]"),
-    ("botinfo", "Uptime, servers and runtime information.", "/botinfo  ·  !botinfo"),
-    ("avatar", "Full-size avatar with a download link.", "/avatar [member]  ·  !avatar [member]"),
-    ("help", "This command list.", "/help  ·  !help"),
-    ("timer", "Get a private reminder by DM after a set time.", "/timer time reminder  ·  !timer time reminder"),
-    ("translate", "Translate text into another language.", "/translate language text"),
+    ("ping", "Check the bot's response time and status.", "/ping  ·  !ping"),
+    ("serverinfo", "Owner, boosts, members, channels, roles and creation date. Browse roles and emojis from the menu.", "/serverinfo  ·  !server"),
+    ("userinfo", "Account details for a member: join date, account age and roles.", "/userinfo [member]  ·  !user [member]"),
+    ("botinfo", "Uptime, latency, server count and runtime information.", "/botinfo  ·  !botinfo"),
+    ("avatar", "Show a member's avatar at full size, with a download button.", "/avatar [member]  ·  !avatar [member]"),
+    ("translate", "Translate any text into another language.", "/translate language text"),
+    ("timer", "Start a timer everyone in the channel can see. You get a DM when it ends.", "/timer time reminder  ·  !timer time reminder"),
+    ("help", "Show this command list.", "/help  ·  !help"),
 ]
 
 ADMIN_COMMANDS = [
-    ("poll", "Public poll with live vote counts and up to five options.", "/poll question option1 option2 [option3] [option4] [option5]", "Manage Messages"),
+    ("giveaway create", "Start a giveaway with automatic rerolls for winners who don't claim in time.", "/giveaway create prize duration [winners] [timereclaim]  ·  !giveway prize duration [winners] [timereclaim]", "Manage Server"),
+    ("giveaway end", "End a giveaway early and pick the winners.", "/giveaway end message_id", "Manage Server"),
+    ("giveaway reroll", "Pick new winners for prizes that were not claimed.", "/giveaway reroll message_id  ·  !reroll (reply to the giveaway)", "Manage Server"),
     ("tickets-setup", "Post the ticket panel in this channel.", "/tickets-setup", "Manage Server"),
-    ("bot-say", "Send a message without revealing who sent it.", "/bot-say message [channel]", "Manage Messages"),
+    ("categorytickets", "Choose the category where new tickets are created.", "/categorytickets category", "Manage Channels"),
+    ("poll", "Public poll with live vote counts and up to five options.", "/poll question option1 option2 [option3] [option4] [option5]", "Manage Messages"),
+    ("bot-say", "Send a message through the bot without showing who sent it.", "/bot-say message [channel]", "Manage Messages"),
     ("embed", "Send a custom embed with color, footer and image.", "/embed [title] [description] [color] [footer] [image] [image_url]", "Manage Messages"),
     ("emojisteal", "Copy a custom emoji from another server into this one.", "/emojisteal emoji [name]", "Manage Expressions"),
-    ("addemojirole", "Give a role when members react with an emoji.", "/addemojirole emoji role [message_id]", "Manage Roles"),
-    ("giveaway create", "Start a giveaway. Winners who don't claim in time are rerolled automatically.", "/giveaway create prize duration [winners] [timereclaim]  ·  !giveway prize duration [winners] [timereclaim]", "Manage Server"),
-    ("giveaway end", "End a giveaway early and pick the winner(s).", "/giveaway end message_id", "Manage Server"),
-    ("giveaway reroll", "Reroll winners who have not claimed their prize.", "/giveaway reroll message_id  ·  !reroll (reply to the giveaway)", "Manage Server"),
+    ("addemojirole", "Give a role when members react with an emoji. Reply to a message and use the prefix version to target it.", "/addemojirole emoji role [message_id]  ·  !addemojirole emoji @role (reply)", "Manage Roles"),
+    ("removeemojirole", "Remove a reaction role rule.", "/removeemojirole emoji [message_id]", "Manage Roles"),
+    ("autorol", "Give a role automatically to every new member.", "/autorol role", "Manage Roles"),
+    ("autorol-off", "Stop giving the auto role to new members.", "/autorol-off", "Manage Roles"),
+    ("welcomes-setup", "Send new member welcomes to a channel.", "/welcomes-setup channel", "Manage Server"),
+    ("welcomes-on", "Turn welcomes back on in the default channel.", "/welcomes-on", "Manage Server"),
+    ("welcomes-off", "Turn new member welcomes off.", "/welcomes-off", "Manage Server"),
 ]
+
+HELP_CATEGORIES = {
+    "public": [
+        ("Utility", ["ping", "serverinfo", "userinfo", "botinfo", "avatar"]),
+        ("Tools", ["translate", "timer", "help"]),
+    ],
+    "admin": [
+        ("Giveaways", ["giveaway create", "giveaway end", "giveaway reroll"]),
+        ("Tickets", ["tickets-setup", "categorytickets"]),
+        ("Welcome & roles", ["welcomes-setup", "welcomes-on", "welcomes-off", "autorol", "autorol-off", "addemojirole", "removeemojirole"]),
+        ("Moderation & tools", ["poll", "bot-say", "embed", "emojisteal"]),
+    ],
+}
 
 PREFIX_MAP = {
     "ping": "ping",
@@ -743,6 +763,9 @@ PREFIX_MAP = {
     "avatar": "avatar",
     "help": "help",
     "timer": "timer",
+    "giveaway create": "giveway",
+    "reroll": "reroll",
+    "addemojirole": "addemojirole",
 }
 
 class CommandSelect(discord.ui.Select):
@@ -769,23 +792,56 @@ class CommandView(discord.ui.View):
         super().__init__(timeout=180)
         self.add_item(CommandSelect(owner_id, entries, admin))
 
-def build_help_embed() -> discord.Embed:
-    lines = []
-    for name, desc, _ in PUBLIC_COMMANDS:
-        prefix = f"  ·  `!{PREFIX_MAP[name]}`" if name in PREFIX_MAP else ""
-        lines.append(f"**`/{name}`**{prefix}\n{desc}")
+def _help_fields(entries: list[tuple], groups: list[tuple[str, list[str]]], admin: bool) -> list[tuple[str, str]]:
+    by_name = {e[0]: e for e in entries}
+    fields = []
+    for title, names in groups:
+        lines = []
+        for name in names:
+            entry = by_name.get(name)
+            if entry is None:
+                continue
+            prefix = f" · `!{PREFIX_MAP[name]}`" if name in PREFIX_MAP else ""
+            perm = f" · *{entry[3]}*" if admin else ""
+            lines.append(f"**`/{name}`**{prefix}{perm}\n{entry[1]}")
+        if lines:
+            fields.append((title, "\n\n".join(lines)))
+    return fields
 
-    embed = base_embed("Commands", "Browse commands with the menu below.\n​", SLATE)
-    embed.add_field(name="Available to everyone", value="\n\n".join(lines), inline=False)
-    embed.set_footer(text=f"{BOT_NAME} · Prefix: ! · v{BOT_VERSION}")
+
+def build_help_embed() -> discord.Embed:
+    intro = (
+        f"Welcome to **{BOT_NAME}**, the protection and utility bot for your community.\n\n"
+        "Every command works as a slash command (`/`), and most also work with the prefix `!`. "
+        "Pick a command in the menu below to see its full usage."
+    )
+    embed = base_embed(f"{E('synexprotect', '🛡️')} Command center", intro, SLATE)
+    if bot.user:
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+    for name, value in _help_fields(PUBLIC_COMMANDS, HELP_CATEGORIES["public"], admin=False):
+        embed.add_field(name=name, value=value, inline=False)
+    embed.add_field(
+        name="Need help?",
+        value="Open a ticket from the support panel, or ask a staff member.",
+        inline=False,
+    )
+    embed.set_footer(text=f"{BOT_NAME} · Prefix ! · v{BOT_VERSION}")
     return embed
+
 
 def build_helpadmin_embed() -> discord.Embed:
-    lines = [f"**`/{name}`**  ·  *{perm}*\n{desc}" for name, desc, _, perm in ADMIN_COMMANDS]
-    embed = base_embed("Administrator commands", "Restricted to members with the listed permission.\n​", INK)
-    embed.add_field(name="Moderation & tools", value="\n\n".join(lines), inline=False)
+    intro = (
+        "Commands for staff. Each one requires the permission shown next to it.\n\n"
+        "Pick a command in the menu below to see its usage."
+    )
+    embed = base_embed(f"{E('transfer', '🔁')} Administrator commands", intro, INK)
+    if bot.user:
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+    for name, value in _help_fields(ADMIN_COMMANDS, HELP_CATEGORIES["admin"], admin=True):
+        embed.add_field(name=name, value=value, inline=False)
     embed.set_footer(text=f"{BOT_NAME} · Admin panel · v{BOT_VERSION}")
     return embed
+
 
 @bot.tree.command(name="help", description="Show the list of available commands.")
 async def help_cmd(interaction: discord.Interaction):
