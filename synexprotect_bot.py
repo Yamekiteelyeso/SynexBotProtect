@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.10.0"
+BOT_VERSION = "1.11.0"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -280,6 +280,7 @@ async def on_ready():
     load_reaction_roles()
     load_tickets()
     load_welcomes()
+    load_autoroles()
     await _sync_tickets_from_discord()
     bot.add_view(build_panel_view())
     for ticket in ticket_data["open"].values():
@@ -1880,7 +1881,8 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
     number = ticket_data["counter"]
     name = f"{ttype['key']}-{number:04d}"[:100]
 
-    category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
+    category_id = ticket_data.get("category_id") or TICKET_CATEGORY_ID
+    category = guild.get_channel(category_id) if category_id else None
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         interaction.user: discord.PermissionOverwrite(
@@ -2240,6 +2242,19 @@ async def _inactivity_loop() -> None:
         await asyncio.sleep(600)
 
 
+@bot.tree.command(name="categorytickets", description="Choose the category where ticket channels are created.")
+@app_commands.describe(category="The category where new tickets will be opened")
+@app_commands.default_permissions(manage_channels=True)
+@app_commands.checks.has_permissions(manage_channels=True)
+@app_commands.guild_only()
+async def categorytickets(interaction: discord.Interaction, category: discord.CategoryChannel):
+    ticket_data["category_id"] = category.id
+    save_tickets()
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} New tickets will be opened in **{category.name}**."), ephemeral=True
+    )
+
+
 @bot.tree.command(name="tickets-setup", description="Post the ticket panel in this channel.")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -2293,8 +2308,33 @@ def build_welcome_layout(member: discord.Member) -> discord.ui.LayoutView:
     return view
 
 
+AUTOROLES_FILE = DATA_DIR / "autoroles.json"
+autoroles: dict[str, int] = {}  # guild_id -> role_id
+
+
+def load_autoroles() -> None:
+    global autoroles
+    try:
+        autoroles = json.loads(AUTOROLES_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        autoroles = {}
+
+
+def save_autoroles() -> None:
+    AUTOROLES_FILE.write_text(json.dumps(autoroles, indent=2), encoding="utf-8")
+
+
 @bot.event
 async def on_member_join(member: discord.Member):
+    role_id = autoroles.get(str(member.guild.id))
+    if role_id:
+        role = member.guild.get_role(role_id)
+        if role is not None and role < member.guild.me.top_role:
+            try:
+                await member.add_roles(role, reason="Auto role on join")
+            except discord.HTTPException as exc:
+                print(f"[autorol] could not give role: {exc}")
+
     channel_id = welcome_config.get(str(member.guild.id))
     if not channel_id:
         return
@@ -2321,6 +2361,35 @@ async def welcomes_setup(interaction: discord.Interaction, channel: discord.Text
     await interaction.response.send_message(
         embed=notice(f"{E('true', '✅')} Welcomes will be sent in {channel.mention}."), ephemeral=True
     )
+
+
+@bot.tree.command(name="autorol", description="Give this role automatically to everyone who joins.")
+@app_commands.describe(role="The role new members receive")
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.guild_only()
+async def autorol(interaction: discord.Interaction, role: discord.Role):
+    me = interaction.guild.me
+    if role.is_default() or role.managed or role >= me.top_role:
+        return await interaction.response.send_message(
+            embed=error_notice("I can't give that role. Make sure it's below my highest role and isn't managed by an integration."),
+            ephemeral=True,
+        )
+    autoroles[str(interaction.guild_id)] = role.id
+    save_autoroles()
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} New members will get {role.mention}."), ephemeral=True
+    )
+
+
+@bot.tree.command(name="autorol-off", description="Stop giving the auto role to new members.")
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.guild_only()
+async def autorol_off(interaction: discord.Interaction):
+    autoroles.pop(str(interaction.guild_id), None)
+    save_autoroles()
+    await interaction.response.send_message(embed=notice("Auto role is off."), ephemeral=True)
 
 
 @bot.tree.command(name="welcomes-off", description="Stop sending new member welcomes.")
