@@ -4691,6 +4691,8 @@ AFK_STATE: dict[tuple[int, int], dict] = {}
 
 
 async def _set_afk_nick(member: discord.Member) -> bool:
+    if member.id == member.guild.owner_id:
+        return True  # Discord no permite cambiar el apodo del dueño; solo se avisa en menciones
     if member.display_name.startswith("[AFK] "):
         return True
     try:
