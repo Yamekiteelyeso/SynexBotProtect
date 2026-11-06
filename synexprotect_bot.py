@@ -1256,6 +1256,14 @@ async def translate_prefix(ctx: commands.Context, language: str, *, text: str | 
     translated = await _translate_text(source_text, code)
     if translated is None:
         return await ctx.reply(embed=error_notice(tr(gid, "translate.failed")), mention_author=False)
+    if source is not None:
+        for start in range(0, len(translated), 2000):
+            if start == 0:
+                await ctx.reply(translated[start:start + 2000], mention_author=False,
+                                allowed_mentions=discord.AllowedMentions.none())
+            else:
+                await ctx.send(translated[start:start + 2000], allowed_mentions=discord.AllowedMentions.none())
+        return
     await ctx.reply(embed=_translation_embed(source_text, translated, code), mention_author=False)
 
 
@@ -4682,13 +4690,15 @@ for _anime_name in ANIME_ACTIONS:
 AFK_STATE: dict[tuple[int, int], dict] = {}
 
 
-async def _set_afk_nick(member: discord.Member) -> None:
+async def _set_afk_nick(member: discord.Member) -> bool:
     if member.display_name.startswith("[AFK] "):
-        return
+        return True
     try:
         await member.edit(nick=f"[AFK] {member.display_name}"[:32], reason="AFK")
-    except discord.HTTPException:
-        pass
+        return True
+    except discord.HTTPException as exc:
+        print(f"[afk] could not rename {member} to AFK: {exc}")
+        return False
 
 
 async def _clear_afk_nick(member: discord.Member, record: dict) -> None:
@@ -4698,19 +4708,20 @@ async def _clear_afk_nick(member: discord.Member, record: dict) -> None:
         pass
 
 
-async def _start_afk(member: discord.Member, reason: str) -> None:
+async def _start_afk(member: discord.Member, reason: str) -> bool:
     AFK_STATE[(member.guild.id, member.id)] = {
         "since": now_ts(), "reason": reason, "nick": member.nick, "mentions": [],
     }
-    await _set_afk_nick(member)
+    return await _set_afk_nick(member)
 
 
 @bot.command(name="afk")
 async def afk_prefix(ctx: commands.Context, *, reason: str = "AFK"):
     if ctx.guild is None:
         return
-    await _start_afk(ctx.author, reason[:120])
-    await ctx.reply(embed=base_embed(f"{E('warn3', '😴')} {tr(ctx.guild.id, 'afk.now')}", reason[:120], STEEL),
+    renamed = await _start_afk(ctx.author, reason[:120])
+    note = "" if renamed else "\n-# I couldn't add [AFK] to your nickname: check that my role is above yours and that I have Manage Nicknames."
+    await ctx.reply(embed=base_embed(f"{E('warn3', '😴')} {tr(ctx.guild.id, 'afk.now')}", reason[:120] + note, STEEL),
                     mention_author=False)
 
 
@@ -4718,9 +4729,10 @@ async def afk_prefix(ctx: commands.Context, *, reason: str = "AFK"):
 @app_commands.describe(reason="Why you are away")
 @app_commands.guild_only()
 async def afk_slash(interaction: discord.Interaction, reason: app_commands.Range[str, 1, 120] = "AFK"):
-    await _start_afk(interaction.user, reason)
+    renamed = await _start_afk(interaction.user, reason)
+    note = "" if renamed else "\n-# I couldn't add [AFK] to your nickname: check that my role is above yours and that I have Manage Nicknames."
     await interaction.response.send_message(
-        embed=base_embed(f"{E('warn3', '😴')} {tr(interaction.guild_id, 'afk.now')}", reason, STEEL), ephemeral=True
+        embed=base_embed(f"{E('warn3', '😴')} {tr(interaction.guild_id, 'afk.now')}", reason + note, STEEL), ephemeral=True
     )
 
 
@@ -4742,11 +4754,16 @@ async def _afk_on_message(message: discord.Message) -> None:
                                        allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException:
             pass
-    for target in message.mentions:
-        if target.bot or target.id == message.author.id:
+    mentioned_ids = {m.id for m in message.mentions}
+    mentioned_ids.update(int(x) for x in re.findall(r"<@!?(\d+)>", message.content or ""))
+    for target_id in mentioned_ids:
+        if target_id == message.author.id:
             continue
-        mentioned = AFK_STATE.get((gid, target.id))
+        mentioned = AFK_STATE.get((gid, target_id))
         if mentioned is None:
+            continue
+        target = message.guild.get_member(target_id)
+        if target is None or target.bot:
             continue
         mentioned["mentions"] = (mentioned["mentions"] + [{"author": str(message.author), "url": message.jump_url}])[-25:]
         try:
