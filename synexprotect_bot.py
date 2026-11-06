@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.11.4"
+BOT_VERSION = "1.11.5"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -200,24 +200,35 @@ def build_ping_embed() -> discord.Embed:
     return embed
 
 
+def fixed_emoji(name: str, emoji_id: int, animated: bool = False) -> str:
+    """Exact emoji by ID, so a same-named emoji elsewhere can't be picked by mistake."""
+    return f"<{'a' if animated else ''}:{name}:{emoji_id}>"
+
+
 def build_serverinfo_embed(guild: discord.Guild) -> discord.Embed:
     roles = [r for r in guild.roles if not r.is_default()]
     humans = sum(1 for m in guild.members if not m.bot)
     bots = sum(1 for m in guild.members if m.bot)
     text_count, voice_count = len(guild.text_channels), len(guild.voice_channels)
-    boost_emoji = E("nitroboosterrmz1", "🚀")
+    boost_emoji = fixed_emoji("nitroboosterrmz1", 1566625344935436398, animated=True)
+    crown = fixed_emoji("Crown", 1568198986622574734)
+    boosts = fixed_emoji("Boosts", 1568198366763159602)
+    community = fixed_emoji("community", 1385211510736818176)
+    hashtag = fixed_emoji("white_hashtag", 1495581952978321640)
+    star = fixed_emoji("estrella_vacia", 1568200011660140544)
+    logo = fixed_emoji("synexprotect", 1568001429258641661)
 
     lines = [
-        f"{E('Crown', '👑')} **Owner**\n{guild.owner.mention if guild.owner else 'Unknown'}",
-        f"{E('Boosts', '💎')} **Server Boosts**\nLevel {guild.premium_tier} • {guild.premium_subscription_count} Boosts {boost_emoji}",
-        f"{E('community', '👥')} **Members**\n{guild.member_count:,} Total • {humans:,} humans • {bots:,} bots",
-        f"{E('white_hashtag', '#️⃣')} **Channels**\n{text_count} Text • {voice_count} Voice",
-        f"{E('estrella_vacia', '⭐')} **Roles**\n{len(roles)} Total",
+        f"{crown} **Owner**\n{guild.owner.mention if guild.owner else 'Unknown'}",
+        f"{boosts} **Server Boosts**\nLevel {guild.premium_tier} • {guild.premium_subscription_count} Boosts {boost_emoji}",
+        f"{community} **Members**\n{guild.member_count:,} Total • {humans:,} humans • {bots:,} bots",
+        f"{hashtag} **Channels**\n{text_count} Text • {voice_count} Voice",
+        f"{star} **Roles**\n{len(roles)} Total",
         f"🕓 **Created**\n{discord.utils.format_dt(guild.created_at, 'D')} • {discord.utils.format_dt(guild.created_at, 'R')}",
-        f"{E('synexprotect', '🛡️')} **Server ID**\n`{guild.id}`",
+        f"{logo} **Server ID**\n`{guild.id}`",
     ]
     embed = discord.Embed(
-        title=f"{E('synexprotect', '🛡️')} Server Information",
+        title=f"{logo} Server Information",
         description="\n\n".join(lines),
         color=CHARCOAL,
         timestamp=datetime.now(timezone.utc),
