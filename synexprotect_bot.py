@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.15.0"
+BOT_VERSION = "1.17.0"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -162,7 +162,7 @@ def now_ts() -> int:
 def build_ping_embed() -> discord.Embed:
     ms = round(bot.latency * 1000)
     status = "Excellent" if ms < 100 else "Good" if ms < 200 else "Degraded"
-    embed = base_embed("⚡ Latency", color=SLATE)
+    embed = base_embed(f"{E(['ping', 'latency'], '⚡')} Latency", color=STEEL)
     embed.add_field(name="Response time", value=f"`{ms} ms`", inline=True)
     embed.add_field(name="Status", value=status, inline=True)
     return embed
@@ -283,7 +283,8 @@ def build_userinfo_embed(member: discord.Member) -> discord.Embed:
     roles = [r for r in reversed(member.roles) if not r.is_default()]
     role_text = " ".join(r.mention for r in roles[:15]) + (f" +{len(roles) - 15} more" if len(roles) > 15 else "")
 
-    embed = base_embed(str(member), f"Profile of {member.mention}", STEEL)
+    embed = base_embed(f"{E(['community', 'members'], '👤')} Profile", f"{member.mention}  ·  `{member}`", STEEL)
+    embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
     embed.set_thumbnail(url=member.display_avatar.replace(size=1024).url)
     embed.add_field(name="Display name", value=member.display_name, inline=True)
     embed.add_field(name="User ID", value=f"`{member.id}`", inline=True)
@@ -301,7 +302,7 @@ def build_botinfo_embed() -> discord.Embed:
     uptime = (datetime.now(timezone.utc) - START_TIME).total_seconds()
     total_users = sum(g.member_count or 0 for g in bot.guilds)
 
-    embed = base_embed(BOT_NAME, "Utility and protection for your community.", INK)
+    embed = base_embed(f"{E(['synexprotect', 'shield'], '🛡️')} {BOT_NAME}", "Utility and protection for your community.", INK)
     if bot.user:
         embed.set_thumbnail(url=bot.user.display_avatar.url)
     embed.add_field(name="Uptime", value=fmt_seconds(uptime), inline=True)
@@ -319,7 +320,8 @@ def build_botinfo_embed() -> discord.Embed:
 
 def build_avatar(user: discord.abc.User) -> tuple[discord.Embed, discord.ui.View]:
     url = user.display_avatar.with_size(4096).url
-    embed = base_embed(f"{user.display_name}", f"Avatar of {user.mention}", STEEL)
+    embed = base_embed(f"{E(['community', 'members'], '🖼️')} {user.display_name}", f"Avatar of {user.mention}", STEEL)
+    embed.set_thumbnail(url=user.display_avatar.replace(size=256).url)
     embed.set_image(url=url)
     view = discord.ui.View()
     view.add_item(discord.ui.Button(label="Download", url=url, style=discord.ButtonStyle.link, emoji="⬇️"))
@@ -343,12 +345,25 @@ async def on_ready():
     if not getattr(bot, "_tickets_loop_started", False):
         bot._tickets_loop_started = True
         asyncio.create_task(_inactivity_loop())
+    if not getattr(bot, "_global_cleared", False):
+        bot._global_cleared = True
+        try:
+            await bot.http.bulk_upsert_global_commands(bot.application_id, payload=[])
+            print("[sync] global commands cleared (commands live per server only)")
+        except discord.HTTPException as exc:
+            print(f"[sync] could not clear global commands: {exc}")
     for guild in bot.guilds:
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-        print(f"[sync] {guild.name}: {len(synced)} commands")
-    await bot.tree.sync()
+        await _sync_guild_commands(guild)
     print(f"{BOT_NAME} online as {bot.user} ({len(bot.guilds)} servers)")
+
+async def _sync_guild_commands(guild: discord.Guild) -> None:
+    bot.tree.copy_global_to(guild=guild)
+    synced = await bot.tree.sync(guild=guild)
+    print(f"[sync] {guild.name}: {len(synced)} commands")
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    await _sync_guild_commands(guild)
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
@@ -582,7 +597,7 @@ async def emojisteal(interaction: discord.Interaction, emoji: str, name: str | N
             ephemeral=True,
         )
 
-    embed = base_embed("😎 Emoji added", f"{created}  ·  `:{created.name}:`", CHARCOAL)
+    embed = base_embed(f"{E(['check', 'success'], '✅')} Emoji added", f"{created}  ·  `:{created.name}:`", STEEL)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 async def _find_message(guild: discord.Guild, message_id: int, prefer: discord.abc.Messageable | None):
@@ -651,7 +666,7 @@ async def addemojirole(
         return await interaction.followup.send(embed=error_notice(error), ephemeral=True)
 
     scope = f"message `{msg_id}`" if msg_id else "any message"
-    embed = base_embed("🏷️ Reaction role saved", color=CHARCOAL)
+    embed = base_embed(f"{E(['check', 'success'], '🏷️')} Reaction role saved", color=STEEL)
     embed.add_field(name="Emoji", value=emoji, inline=True)
     embed.add_field(name="Role", value=role.mention, inline=True)
     embed.add_field(name="Works on", value=scope, inline=False)
@@ -943,7 +958,7 @@ class PollView(discord.ui.View):
             percent = (counts[i] / total * 100) if total else 0
             rows.append(f"{LETTERS[i]}  **{option}**\n{progress_bar(percent)}  `{percent:.0f}%`")
 
-        embed = discord.Embed(description=f"### 📊 {self.question}\n\n" + "\n\n".join(rows), color=SLATE)
+        embed = base_embed(f"{E(['poll', 'stats'], '📊')} {self.question}", "\n\n".join(rows), SLATE)
         votes = f"{total} vote{'s' if total != 1 else ''}"
         embed.set_footer(text=f"{votes} · Click an option to vote · Click it again to remove your vote")
         return embed
@@ -975,7 +990,8 @@ async def poll(
 
 async def _finish_timer(channel: discord.abc.Messageable, user: discord.abc.User, text: str, delay: int) -> None:
     await asyncio.sleep(delay)
-    done = base_embed("⏰ Timer finished", text, STEEL)
+    done = base_embed(f"{E(['timer', 'clock'], '⏰')} Timer finished", text, STEEL)
+    done.set_thumbnail(url=user.display_avatar.url)
     done.add_field(name="Set by", value=user.mention, inline=True)
     try:
         await channel.send(content=user.mention, embed=done, allowed_mentions=discord.AllowedMentions(users=True))
@@ -988,7 +1004,8 @@ async def _finish_timer(channel: discord.abc.Messageable, user: discord.abc.User
 
 async def _start_timer(channel: discord.abc.Messageable, user: discord.abc.User, seconds: int, text: str) -> bool:
     ends = now_ts() + seconds
-    embed = base_embed("⏰ Timer started", text, STEEL)
+    embed = base_embed(f"{E(['timer', 'clock'], '⏰')} Timer started", text, STEEL)
+    embed.set_thumbnail(url=user.display_avatar.url)
     embed.add_field(name="Set by", value=user.mention, inline=True)
     embed.add_field(name="Ends", value=f"<t:{ends}:R> · <t:{ends}:f>", inline=True)
     try:
@@ -1055,7 +1072,7 @@ async def translate(interaction: discord.Interaction, language: str, text: str):
             embed=error_notice("Could not translate. Check the language code (e.g. `en`, `es`)."), ephemeral=True
         )
 
-    embed = base_embed("🌐 Translation", color=CHARCOAL)
+    embed = base_embed(f"{E(['translate', 'globe'], '🌐')} Translation", color=STEEL)
     embed.add_field(name="Original", value=text[:1024], inline=False)
     embed.add_field(name=f"Translated · `{language.lower()}`", value=(translated or "—")[:1024], inline=False)
     await interaction.followup.send(embed=embed, ephemeral=True)
@@ -3143,27 +3160,6 @@ def modlog_cfg(gid: int) -> dict:
     return cfg
 
 
-async def _modlog(guild: discord.Guild, event: str, embed: discord.Embed) -> None:
-    cfg = modlog_cfg(guild.id)
-    if not cfg["channel"] or not cfg["events"].get(event, True):
-        return
-    channel = guild.get_channel(cfg["channel"])
-    if channel is None:
-        return
-    try:
-        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-    except discord.HTTPException as exc:
-        print(f"[modlog] could not post: {exc}")
-
-
-def _log_embed(title: str, color: int, fields: list[tuple[str, str]]) -> discord.Embed:
-    embed = base_embed(title, None, color)
-    for name, value in fields:
-        value = value or "None"
-        embed.add_field(name=name, value=value, inline=len(value) < 60)
-    return embed
-
-
 def _event_on(guild: discord.Guild, event: str) -> bool:
     cfg = modlog_cfg(guild.id)
     return bool(cfg["channel"]) and cfg["events"].get(event, True)
@@ -3177,6 +3173,64 @@ def _who(target) -> str:
     if isinstance(target, (discord.Member, discord.User)):
         return f"{target.mention} · `{target.id}`"
     return f"`{target.id}`"
+
+
+def _avatar_url(target) -> str | None:
+    if isinstance(target, (discord.Member, discord.User)):
+        return target.display_avatar.url
+    if target is not None and getattr(target, "id", None):
+        user = bot.get_user(target.id)
+        return user.display_avatar.url if user else None
+    return None
+
+
+MODLOG_ICONS = {
+    "Member banned": ("Error", "⚠️"),
+    "Member unbanned": ("true", "✅"),
+    "Member kicked": ("warn3", "⚠️"),
+    "Member muted": ("GE_Lock", "🔒"),
+    "Member unmuted": ("true", "✅"),
+    "Invite created": ("community", "🔗"),
+    "Invite deleted": ("false", "❌"),
+    "Member joined by invite": ("GE_member", "👤"),
+    "Joined voice": ("community", "🔊"),
+    "Left voice": ("false", "❌"),
+    "Moved voice": ("transfer", "🔁"),
+}
+
+
+def _action_card(title: str, color: int, target, fields: list[tuple[str, str]]) -> discord.ui.LayoutView:
+    icon_name, icon_fallback = MODLOG_ICONS.get(title, ("synexprotect", "🛡️"))
+    title = f"{E(icon_name, icon_fallback)} {title}"
+    details = "\n\n".join(f"**{name}**\n{value or 'None'}" for name, value in fields)
+    stamp = discord.utils.format_dt(discord.utils.utcnow(), "f")
+    avatar = _avatar_url(target)
+    head_text = discord.ui.TextDisplay(f"### {title}\n-# {_who(target) if target else 'SynexProtect'}")
+    head = (discord.ui.Section(head_text, accessory=discord.ui.Thumbnail(avatar)) if avatar else head_text)
+    container = discord.ui.Container(
+        head,
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(details),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(f"-# {BOT_NAME} · Moderation · {stamp}"),
+        accent_colour=color,
+    )
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
+    return view
+
+
+async def _modlog(guild: discord.Guild, event: str, title: str, color: int, target, fields: list[tuple[str, str]]) -> None:
+    if not _event_on(guild, event):
+        return
+    channel = guild.get_channel(modlog_cfg(guild.id)["channel"])
+    if channel is None:
+        return
+    try:
+        await channel.send(view=_action_card(title, color, target, fields),
+                           allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as exc:
+        print(f"[modlog] could not post: {exc}")
 
 
 async def _audit_peek(guild: discord.Guild, action, target_id: int | None = None, max_age: int = 20):
@@ -3208,7 +3262,7 @@ def _reason(moderator: discord.Member, reason: str) -> str:
     return f"{moderator} ({moderator.id}): {reason}"[:500]
 
 
-async def mod_ban(guild, moderator, target, reason: str, delete_days: int = 0) -> tuple[bool, str]:
+async def mod_ban(guild, moderator, target, reason: str, delete_days: int = 0):
     if isinstance(target, discord.Member):
         error = _hierarchy_error(guild, moderator, target)
         if error:
@@ -3217,15 +3271,13 @@ async def mod_ban(guild, moderator, target, reason: str, delete_days: int = 0) -
         await guild.ban(target, reason=_reason(moderator, reason), delete_message_days=delete_days)
     except discord.HTTPException as exc:
         return False, f"I couldn't ban that user: {exc.text or exc}"
-    await _modlog(guild, "ban", _log_embed(
-        f"{E('Error', '⚠️')} Member banned", ERROR,
-        [("Member", _who(target)), ("Moderator", moderator.mention), ("Reason", reason),
-         ("Messages deleted", f"{delete_days} day(s)")],
-    ))
-    return True, f"{E('true', '✅')} Banned {_who(target)}."
+    fields = [("Member", _who(target)), ("Moderator", moderator.mention), ("Reason", reason),
+              ("Messages deleted", f"{delete_days} day(s)")]
+    await _modlog(guild, "ban", "Member banned", ERROR, target, fields)
+    return True, ("Member banned", ERROR, target, fields)
 
 
-async def mod_unban(guild, moderator, user_id: int, reason: str) -> tuple[bool, str]:
+async def mod_unban(guild, moderator, user_id: int, reason: str):
     try:
         user = await bot.fetch_user(user_id)
     except discord.HTTPException:
@@ -3236,14 +3288,12 @@ async def mod_unban(guild, moderator, user_id: int, reason: str) -> tuple[bool, 
         return False, "That user isn't banned."
     except discord.HTTPException as exc:
         return False, f"I couldn't unban them: {exc.text or exc}"
-    await _modlog(guild, "unban", _log_embed(
-        f"{E('true', '✅')} Member unbanned", CHARCOAL,
-        [("Member", _who(user)), ("Moderator", moderator.mention), ("Reason", reason)],
-    ))
-    return True, f"{E('true', '✅')} Unbanned {user.mention}."
+    fields = [("Member", _who(user)), ("Moderator", moderator.mention), ("Reason", reason)]
+    await _modlog(guild, "unban", "Member unbanned", CHARCOAL, user, fields)
+    return True, ("Member unbanned", CHARCOAL, user, fields)
 
 
-async def mod_kick(guild, moderator, member: discord.Member, reason: str) -> tuple[bool, str]:
+async def mod_kick(guild, moderator, member: discord.Member, reason: str):
     error = _hierarchy_error(guild, moderator, member)
     if error:
         return False, error
@@ -3251,14 +3301,12 @@ async def mod_kick(guild, moderator, member: discord.Member, reason: str) -> tup
         await member.kick(reason=_reason(moderator, reason))
     except discord.HTTPException as exc:
         return False, f"I couldn't kick them: {exc.text or exc}"
-    await _modlog(guild, "kick", _log_embed(
-        f"{E('warn3', '⚠️')} Member kicked", ERROR,
-        [("Member", _who(member)), ("Moderator", moderator.mention), ("Reason", reason)],
-    ))
-    return True, f"{E('true', '✅')} Kicked {_who(member)}."
+    fields = [("Member", _who(member)), ("Moderator", moderator.mention), ("Reason", reason)]
+    await _modlog(guild, "kick", "Member kicked", ERROR, member, fields)
+    return True, ("Member kicked", ERROR, member, fields)
 
 
-async def mod_mute(guild, moderator, member: discord.Member, seconds: int, reason: str) -> tuple[bool, str]:
+async def mod_mute(guild, moderator, member: discord.Member, seconds: int, reason: str):
     error = _hierarchy_error(guild, moderator, member)
     if error:
         return False, error
@@ -3269,26 +3317,36 @@ async def mod_mute(guild, moderator, member: discord.Member, seconds: int, reaso
         await member.timeout(until, reason=_reason(moderator, reason))
     except discord.HTTPException as exc:
         return False, f"I couldn't mute them: {exc.text or exc}"
-    await _modlog(guild, "mute", _log_embed(
-        f"{E('GE_Lock', '🔒')} Member muted", STEEL,
-        [("Member", _who(member)), ("Moderator", moderator.mention), ("Duration", fmt_seconds(seconds)),
-         ("Reason", reason)],
-    ))
-    return True, f"{E('true', '✅')} Muted {_who(member)} for **{fmt_seconds(seconds)}**."
+    fields = [("Member", _who(member)), ("Moderator", moderator.mention), ("Duration", fmt_seconds(seconds)),
+              ("Until", discord.utils.format_dt(until, "f")), ("Reason", reason)]
+    await _modlog(guild, "mute", "Member muted", STEEL, member, fields)
+    return True, ("Member muted", STEEL, member, fields)
 
 
-async def mod_unmute(guild, moderator, member: discord.Member, reason: str) -> tuple[bool, str]:
+async def mod_unmute(guild, moderator, member: discord.Member, reason: str):
     if not member.is_timed_out():
         return False, f"{member.mention} isn't muted."
     try:
         await member.timeout(None, reason=_reason(moderator, reason))
     except discord.HTTPException as exc:
         return False, f"I couldn't unmute them: {exc.text or exc}"
-    await _modlog(guild, "unmute", _log_embed(
-        f"{E('true', '✅')} Member unmuted", CHARCOAL,
-        [("Member", _who(member)), ("Moderator", moderator.mention), ("Reason", reason)],
-    ))
-    return True, f"{E('true', '✅')} Unmuted {member.mention}."
+    fields = [("Member", _who(member)), ("Moderator", moderator.mention), ("Reason", reason)]
+    await _modlog(guild, "unmute", "Member unmuted", CHARCOAL, member, fields)
+    return True, ("Member unmuted", CHARCOAL, member, fields)
+
+
+async def _reply_slash(interaction: discord.Interaction, ok: bool, payload) -> None:
+    if ok:
+        await interaction.response.send_message(view=_action_card(*payload))
+    else:
+        await interaction.response.send_message(embed=error_notice(payload), ephemeral=True)
+
+
+async def _reply_prefix(ctx: commands.Context, ok: bool, payload) -> None:
+    if ok:
+        await ctx.send(view=_action_card(*payload), allowed_mentions=discord.AllowedMentions.none())
+    else:
+        await ctx.send(embed=error_notice(payload), delete_after=12)
 
 
 @bot.tree.command(name="ban", description="Ban a member from the server.")
@@ -3298,8 +3356,8 @@ async def mod_unmute(guild, moderator, member: discord.Member, reason: str) -> t
 @app_commands.guild_only()
 async def ban_cmd(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given",
                   delete_days: app_commands.Range[int, 0, 7] = 0):
-    ok, text = await mod_ban(interaction.guild, interaction.user, member, reason, delete_days)
-    await interaction.response.send_message(embed=notice(text) if ok else error_notice(text), ephemeral=True)
+    ok, payload = await mod_ban(interaction.guild, interaction.user, member, reason, delete_days)
+    await _reply_slash(interaction, ok, payload)
 
 
 @bot.command(name="ban")
@@ -3307,8 +3365,8 @@ async def ban_cmd(interaction: discord.Interaction, member: discord.Member, reas
 @commands.has_permissions(ban_members=True)
 async def ban_prefix(ctx: commands.Context, user: discord.User, *, reason: str = "No reason given"):
     member = ctx.guild.get_member(user.id)
-    ok, text = await mod_ban(ctx.guild, ctx.author, member or user, reason)
-    await ctx.send(embed=notice(text) if ok else error_notice(text), delete_after=None if ok else 12)
+    ok, payload = await mod_ban(ctx.guild, ctx.author, member or user, reason)
+    await _reply_prefix(ctx, ok, payload)
 
 
 @bot.tree.command(name="unban", description="Unban a user by their ID.")
@@ -3321,16 +3379,16 @@ async def unban_cmd(interaction: discord.Interaction, user_id: str, reason: str 
         uid = int(user_id.strip())
     except ValueError:
         return await interaction.response.send_message(embed=error_notice("Invalid user ID."), ephemeral=True)
-    ok, text = await mod_unban(interaction.guild, interaction.user, uid, reason)
-    await interaction.response.send_message(embed=notice(text) if ok else error_notice(text), ephemeral=True)
+    ok, payload = await mod_unban(interaction.guild, interaction.user, uid, reason)
+    await _reply_slash(interaction, ok, payload)
 
 
 @bot.command(name="unban")
 @commands.guild_only()
 @commands.has_permissions(ban_members=True)
 async def unban_prefix(ctx: commands.Context, user_id: int, *, reason: str = "No reason given"):
-    ok, text = await mod_unban(ctx.guild, ctx.author, user_id, reason)
-    await ctx.send(embed=notice(text) if ok else error_notice(text), delete_after=None if ok else 12)
+    ok, payload = await mod_unban(ctx.guild, ctx.author, user_id, reason)
+    await _reply_prefix(ctx, ok, payload)
 
 
 @bot.tree.command(name="kick", description="Kick a member from the server.")
@@ -3339,16 +3397,16 @@ async def unban_prefix(ctx: commands.Context, user_id: int, *, reason: str = "No
 @app_commands.checks.has_permissions(kick_members=True)
 @app_commands.guild_only()
 async def kick_cmd(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given"):
-    ok, text = await mod_kick(interaction.guild, interaction.user, member, reason)
-    await interaction.response.send_message(embed=notice(text) if ok else error_notice(text), ephemeral=True)
+    ok, payload = await mod_kick(interaction.guild, interaction.user, member, reason)
+    await _reply_slash(interaction, ok, payload)
 
 
 @bot.command(name="kick")
 @commands.guild_only()
 @commands.has_permissions(kick_members=True)
 async def kick_prefix(ctx: commands.Context, member: discord.Member, *, reason: str = "No reason given"):
-    ok, text = await mod_kick(ctx.guild, ctx.author, member, reason)
-    await ctx.send(embed=notice(text) if ok else error_notice(text), delete_after=None if ok else 12)
+    ok, payload = await mod_kick(ctx.guild, ctx.author, member, reason)
+    await _reply_prefix(ctx, ok, payload)
 
 
 @bot.tree.command(name="mute", description="Mute (timeout) a member for a set time.")
@@ -3360,8 +3418,8 @@ async def mute_cmd(interaction: discord.Interaction, member: discord.Member, dur
     seconds = parse_duration(duration)
     if seconds is None:
         return await interaction.response.send_message(embed=error_notice("Use a time like `10m`, `2h` or `1d`."), ephemeral=True)
-    ok, text = await mod_mute(interaction.guild, interaction.user, member, seconds, reason)
-    await interaction.response.send_message(embed=notice(text) if ok else error_notice(text), ephemeral=True)
+    ok, payload = await mod_mute(interaction.guild, interaction.user, member, seconds, reason)
+    await _reply_slash(interaction, ok, payload)
 
 
 @bot.command(name="mute")
@@ -3371,8 +3429,8 @@ async def mute_prefix(ctx: commands.Context, member: discord.Member, duration: s
     seconds = parse_duration(duration)
     if seconds is None:
         return await ctx.send(embed=error_notice("Use a time like `10m`, `2h` or `1d`."), delete_after=12)
-    ok, text = await mod_mute(ctx.guild, ctx.author, member, seconds, reason)
-    await ctx.send(embed=notice(text) if ok else error_notice(text), delete_after=None if ok else 12)
+    ok, payload = await mod_mute(ctx.guild, ctx.author, member, seconds, reason)
+    await _reply_prefix(ctx, ok, payload)
 
 
 @bot.tree.command(name="unmute", description="Remove a member's mute (timeout).")
@@ -3381,16 +3439,16 @@ async def mute_prefix(ctx: commands.Context, member: discord.Member, duration: s
 @app_commands.checks.has_permissions(moderate_members=True)
 @app_commands.guild_only()
 async def unmute_cmd(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given"):
-    ok, text = await mod_unmute(interaction.guild, interaction.user, member, reason)
-    await interaction.response.send_message(embed=notice(text) if ok else error_notice(text), ephemeral=True)
+    ok, payload = await mod_unmute(interaction.guild, interaction.user, member, reason)
+    await _reply_slash(interaction, ok, payload)
 
 
 @bot.command(name="unmute")
 @commands.guild_only()
 @commands.has_permissions(moderate_members=True)
 async def unmute_prefix(ctx: commands.Context, member: discord.Member, *, reason: str = "No reason given"):
-    ok, text = await mod_unmute(ctx.guild, ctx.author, member, reason)
-    await ctx.send(embed=notice(text) if ok else error_notice(text), delete_after=None if ok else 12)
+    ok, payload = await mod_unmute(ctx.guild, ctx.author, member, reason)
+    await _reply_prefix(ctx, ok, payload)
 
 
 class ModlogEventsSelect(discord.ui.Select):
@@ -3457,11 +3515,9 @@ async def _log_ban(guild: discord.Guild, user: discord.User) -> None:
     entry = await _audit_peek(guild, discord.AuditLogAction.ban, user.id)
     if entry is not None and entry.user is not None and entry.user.id == bot.user.id:
         return
-    await _modlog(guild, "ban", _log_embed(
-        f"{E('Error', '⚠️')} Member banned", ERROR,
-        [("Member", _who(user)), ("Moderator", entry.user.mention if entry and entry.user else "Unknown"),
-         ("Reason", entry.reason if entry and entry.reason else "None")],
-    ))
+    fields = [("Member", _who(user)), ("Moderator", entry.user.mention if entry and entry.user else "Unknown"),
+              ("Reason", entry.reason if entry and entry.reason else "None")]
+    await _modlog(guild, "ban", "Member banned", ERROR, user, fields)
 
 
 async def _log_unban(guild: discord.Guild, user: discord.User) -> None:
@@ -3470,10 +3526,8 @@ async def _log_unban(guild: discord.Guild, user: discord.User) -> None:
     entry = await _audit_peek(guild, discord.AuditLogAction.unban, user.id)
     if entry is not None and entry.user is not None and entry.user.id == bot.user.id:
         return
-    await _modlog(guild, "unban", _log_embed(
-        f"{E('true', '✅')} Member unbanned", CHARCOAL,
-        [("Member", _who(user)), ("Moderator", entry.user.mention if entry and entry.user else "Unknown")],
-    ))
+    fields = [("Member", _who(user)), ("Moderator", entry.user.mention if entry and entry.user else "Unknown")]
+    await _modlog(guild, "unban", "Member unbanned", CHARCOAL, user, fields)
 
 
 async def _log_kick(member: discord.Member) -> None:
@@ -3482,30 +3536,24 @@ async def _log_kick(member: discord.Member) -> None:
     entry = await _audit_peek(member.guild, discord.AuditLogAction.kick, member.id)
     if entry is None or (entry.user is not None and entry.user.id == bot.user.id):
         return
-    await _modlog(member.guild, "kick", _log_embed(
-        f"{E('warn3', '⚠️')} Member kicked", ERROR,
-        [("Member", _who(member)), ("Moderator", entry.user.mention if entry.user else "Unknown"),
-         ("Reason", entry.reason or "None")],
-    ))
+    fields = [("Member", _who(member)), ("Moderator", entry.user.mention if entry.user else "Unknown"),
+              ("Reason", entry.reason or "None")]
+    await _modlog(member.guild, "kick", "Member kicked", ERROR, member, fields)
 
 
 async def _log_timeout(before: discord.Member, after: discord.Member) -> None:
-    if not _event_on(after.guild, "mute") and not _event_on(after.guild, "unmute"):
+    if not (_event_on(after.guild, "mute") or _event_on(after.guild, "unmute")):
         return
     entry = await _audit_peek(after.guild, discord.AuditLogAction.member_update, after.id)
     if entry is None or entry.user is None or entry.user.id == bot.user.id:
         return
     if after.is_timed_out():
-        await _modlog(after.guild, "mute", _log_embed(
-            f"{E('GE_Lock', '🔒')} Member muted", STEEL,
-            [("Member", _who(after)), ("Moderator", entry.user.mention),
-             ("Until", discord.utils.format_dt(after.timed_out_until, "f")), ("Reason", entry.reason or "None")],
-        ))
+        fields = [("Member", _who(after)), ("Moderator", entry.user.mention),
+                  ("Until", discord.utils.format_dt(after.timed_out_until, "f")), ("Reason", entry.reason or "None")]
+        await _modlog(after.guild, "mute", "Member muted", STEEL, after, fields)
     else:
-        await _modlog(after.guild, "unmute", _log_embed(
-            f"{E('true', '✅')} Member unmuted", CHARCOAL,
-            [("Member", _who(after)), ("Moderator", entry.user.mention), ("Reason", entry.reason or "None")],
-        ))
+        fields = [("Member", _who(after)), ("Moderator", entry.user.mention), ("Reason", entry.reason or "None")]
+        await _modlog(after.guild, "unmute", "Member unmuted", CHARCOAL, after, fields)
 
 
 @bot.event
@@ -3533,22 +3581,18 @@ async def on_invite_create(invite: discord.Invite):
     _invite_cache.setdefault(guild.id, {})[invite.code] = invite.uses or 0
     expires = "Never" if not invite.max_age else discord.utils.format_dt(
         discord.utils.utcnow() + timedelta(seconds=invite.max_age), "R")
-    await _modlog(guild, "invite_create", _log_embed(
-        f"{E('community', '🔗')} Invite created", CHARCOAL,
-        [("Code", f"`discord.gg/{invite.code}`"), ("Channel", _chan(invite.channel)),
-         ("Created by", invite.inviter.mention if invite.inviter else "Unknown"),
-         ("Max uses", str(invite.max_uses) if invite.max_uses else "Unlimited"), ("Expires", expires)],
-    ))
+    fields = [("Code", f"`discord.gg/{invite.code}`"), ("Channel", _chan(invite.channel)),
+              ("Created by", invite.inviter.mention if invite.inviter else "Unknown"),
+              ("Max uses", str(invite.max_uses) if invite.max_uses else "Unlimited"), ("Expires", expires)]
+    await _modlog(guild, "invite_create", "Invite created", CHARCOAL, invite.inviter, fields)
 
 
 @bot.event
 async def on_invite_delete(invite: discord.Invite):
     guild = invite.guild
     _invite_cache.get(guild.id, {}).pop(invite.code, None)
-    await _modlog(guild, "invite_delete", _log_embed(
-        f"{E('false', '❌')} Invite deleted", STEEL,
-        [("Code", f"`discord.gg/{invite.code}`"), ("Channel", _chan(invite.channel))],
-    ))
+    fields = [("Code", f"`discord.gg/{invite.code}`"), ("Channel", _chan(invite.channel))]
+    await _modlog(guild, "invite_delete", "Invite deleted", STEEL, None, fields)
 
 
 async def _log_invite_join(member: discord.Member) -> None:
@@ -3572,10 +3616,8 @@ async def _log_invite_join(member: discord.Member) -> None:
         code_text, inviter_text, channel_text = f"`discord.gg/{gone[0]}`", "Unknown", "Unknown"
     else:
         code_text, inviter_text, channel_text = "Unknown (vanity or unknown link)", "Unknown", "Unknown"
-    await _modlog(guild, "invite_join", _log_embed(
-        f"{E('GE_member', '👤')} Member joined by invite", CHARCOAL,
-        [("Member", _who(member)), ("Invite", code_text), ("Invited by", inviter_text), ("Channel", channel_text)],
-    ))
+    fields = [("Member", _who(member)), ("Invite", code_text), ("Invited by", inviter_text), ("Channel", channel_text)]
+    await _modlog(guild, "invite_join", "Member joined by invite", CHARCOAL, member, fields)
 
 
 @bot.event
@@ -3583,15 +3625,13 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     if member.bot or before.channel == after.channel:
         return
     if before.channel is None:
-        title, color, fields = f"{E('community', '🔊')} Joined voice", CHARCOAL, [
-            ("Member", _who(member)), ("Channel", after.channel.mention)]
+        title, color, fields = "Joined voice", CHARCOAL, [("Member", _who(member)), ("Channel", after.channel.mention)]
     elif after.channel is None:
-        title, color, fields = f"{E('false', '❌')} Left voice", STEEL, [
-            ("Member", _who(member)), ("Channel", before.channel.mention)]
+        title, color, fields = "Left voice", STEEL, [("Member", _who(member)), ("Channel", before.channel.mention)]
     else:
-        title, color, fields = f"{E('transfer', '🔁')} Moved voice", CHARCOAL, [
+        title, color, fields = "Moved voice", CHARCOAL, [
             ("Member", _who(member)), ("From", before.channel.mention), ("To", after.channel.mention)]
-    await _modlog(member.guild, "voice", _log_embed(title, color, fields))
+    await _modlog(member.guild, "voice", title, color, member, fields)
 
 
 if __name__ == "__main__":
