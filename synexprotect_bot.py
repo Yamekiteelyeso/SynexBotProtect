@@ -2974,6 +2974,7 @@ STRINGS = {
         "afk.mentions": "You were mentioned **{n}** time(s).",
         "afk.jump": "Jump to message",
         "afk.is_afk": "**{name}** is AFK",
+        "afk.mention_title": "{name} has been AFK for {time}",
         "afk.since": "Since",
         "afk.ago": "for {time}",
         "bot.hi": "Hi {name}!",
@@ -3036,6 +3037,7 @@ STRINGS = {
         "afk.mentions": "Te mencionaron **{n}** vez(ces).",
         "afk.jump": "Ir al mensaje",
         "afk.is_afk": "**{name}** está AFK",
+        "afk.mention_title": "{name} lleva AFK {time}",
         "afk.since": "Desde",
         "afk.ago": "desde hace {time}",
         "bot.hi": "¡Hola {name}!",
@@ -4770,12 +4772,13 @@ async def _afk_on_message(message: discord.Message) -> None:
         try:
             away = fmt_seconds(max(0, now_ts() - mentioned["since"]))
             await message.channel.send(
-                f"{tr(gid, 'afk.is_afk', name=target.display_name)} {tr(gid, 'afk.ago', time=away)}.",
+                embed=base_embed(f"{E('warn3', '😴')} {tr(gid, 'afk.mention_title', name=target.display_name, time=away)}",
+                                 mentioned["reason"], STEEL),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException:
             pass
-    if bot.user is not None and any(u.id == bot.user.id for u in message.mentions):
+    if bot.user is not None and re.search(rf"<@!?{bot.user.id}>", message.content or ""):
         try:
             await message.channel.send(
                 embed=base_embed(tr(gid, "bot.hi", name=message.author.display_name),
