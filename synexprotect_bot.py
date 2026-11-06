@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.11.0"
+BOT_VERSION = "1.11.1"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -2284,44 +2284,40 @@ def save_welcomes() -> None:
     WELCOMES_FILE.write_text(json.dumps(welcome_config, indent=2), encoding="utf-8")
 
 
+WELCOME_LINKS = [
+    # (label, emoji names to try, url)
+    ("See Rules", ["GE_rules"], "https://discord.com/channels/1557386505226420385/1557387851619106897"),
+    ("Chat", ["community~1", "community_1", "community1", "community"], "https://discord.com/channels/1557386505226420385/1557389744957292555"),
+    ("tickets", ["NofiTicket"], "https://discord.com/channels/1557386505226420385/1557389744957292555"),
+]
+
+
 def build_welcome_layout(member: discord.Member) -> discord.ui.LayoutView:
-    title = discord.ui.TextDisplay(
-        f"# {E('GE_member', '👋')} Welcome to {WELCOME_SERVER_NAME}, {member.mention}"
-    )
+    title = discord.ui.TextDisplay(f"# {E('GE_member', '👋')} Welcome to {WELCOME_SERVER_NAME},")
     head = discord.ui.Section(title, accessory=discord.ui.Thumbnail(member.display_avatar.url))
+    buttons = discord.ui.ActionRow(*[
+        discord.ui.Button(label=label, emoji=E(names, "🔗"), style=discord.ButtonStyle.link, url=url)
+        for label, names, url in WELCOME_LINKS
+    ])
     container = discord.ui.Container(
         head,
         discord.ui.Separator(),
         discord.ui.TextDisplay(
+            f"{member.mention}\n"
             "«Thank you for joining Synex Protect. We're excited to have you as part of our community.»"
         ),
         discord.ui.TextDisplay(
-            f"-# {E('GE_member', '👤')} Member: {member.mention}\n"
+            f"-# {E('GE_member', '👤')} Member: {member.guild.member_count}\n"
             f"-# {E('GE_rules', '📜')} Please read our rules and guidelines.\n"
             f"-# {E('transfer', '🔁')} Stay tuned for upcoming updates."
         ),
         discord.ui.Separator(),
+        buttons,
         accent_colour=STEEL,
     )
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(container)
     return view
-
-
-AUTOROLES_FILE = DATA_DIR / "autoroles.json"
-autoroles: dict[str, int] = {}  # guild_id -> role_id
-
-
-def load_autoroles() -> None:
-    global autoroles
-    try:
-        autoroles = json.loads(AUTOROLES_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        autoroles = {}
-
-
-def save_autoroles() -> None:
-    AUTOROLES_FILE.write_text(json.dumps(autoroles, indent=2), encoding="utf-8")
 
 
 @bot.event
