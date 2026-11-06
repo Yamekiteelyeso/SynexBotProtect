@@ -1,4 +1,7 @@
 import asyncio
+import copy
+import time
+from collections import deque
 import io
 import json
 import os
@@ -20,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.13.0"
+BOT_VERSION = "1.14.0"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -328,6 +331,7 @@ async def on_ready():
     load_tickets()
     load_welcomes()
     load_autoroles()
+    load_antiraid()
     await _sync_tickets_from_discord()
     bot.add_view(build_panel_view())
     for ticket in ticket_data["open"].values():
@@ -740,6 +744,7 @@ ADMIN_COMMANDS = [
     ("welcomes-setup", "Send new member welcomes to a channel.", "/welcomes-setup channel", "Manage Server"),
     ("welcomes-on", "Turn welcomes back on in the default channel.", "/welcomes-on", "Manage Server"),
     ("welcomes-off", "Turn new member welcomes off.", "/welcomes-off", "Manage Server"),
+    ("antiraid", "Owner-only panel for anti-nuke, anti-webhook, anti-raid, trusted users and alerts.", "/antiraid", "Server owner"),
 ]
 
 HELP_CATEGORIES = {
@@ -751,6 +756,7 @@ HELP_CATEGORIES = {
         ("Giveaways", ["giveaway create", "giveaway end", "giveaway reroll"]),
         ("Tickets", ["tickets-setup", "categorytickets"]),
         ("Welcome & roles", ["welcomes-setup", "welcomes-on", "welcomes-off", "autorol", "autorol-off", "addemojirole", "removeemojirole"]),
+        ("Protection", ["antiraid"]),
         ("Moderation & tools", ["poll", "bot-say", "embed", "emojisteal"]),
     ],
 }
@@ -2301,8 +2307,26 @@ def build_welcome_layout(member: discord.Member) -> discord.ui.LayoutView:
     view.add_item(container)
     return view
 
+AUTOROLES_FILE = DATA_DIR / "autoroles.json"
+autoroles: dict[str, int] = {}
+
+
+def load_autoroles() -> None:
+    global autoroles
+    try:
+        autoroles = json.loads(AUTOROLES_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        autoroles = {}
+
+
+def save_autoroles() -> None:
+    AUTOROLES_FILE.write_text(json.dumps(autoroles, indent=2), encoding="utf-8")
+
+
 @bot.event
 async def on_member_join(member: discord.Member):
+    if await _antiraid_join(member):
+        return
     role_id = autoroles.get(str(member.guild.id))
     if role_id:
         role = member.guild.get_role(role_id)
@@ -2386,6 +2410,680 @@ async def welcomes_off(interaction: discord.Interaction):
     welcome_config[str(interaction.guild_id)] = 0
     save_welcomes()
     await interaction.response.send_message(embed=notice("Welcomes are off."), ephemeral=True)
+
+ANTIRAID_FILE = DATA_DIR / "antiraid.json"
+PUNISH_ORDER = ["ban", "kick", "strip"]
+PUNISH_LABELS = {"ban": "Ban", "kick": "Kick", "strip": "Remove roles"}
+
+NUKE_RULES = {
+    "channel_delete": ("Channel delete", discord.AuditLogAction.channel_delete),
+    "channel_create": ("Channel create", discord.AuditLogAction.channel_create),
+    "role_delete": ("Role delete", discord.AuditLogAction.role_delete),
+    "role_create": ("Role create", discord.AuditLogAction.role_create),
+    "ban": ("Member ban", discord.AuditLogAction.ban),
+    "kick": ("Member kick", discord.AuditLogAction.kick),
+    "emoji_delete": ("Emoji delete", discord.AuditLogAction.emoji_delete),
+}
+NUKE_DEFAULTS = {
+    "channel_delete": (3, 10),
+    "channel_create": (5, 10),
+    "role_delete": (3, 10),
+    "role_create": (5, 10),
+    "ban": (3, 15),
+    "kick": (3, 15),
+    "emoji_delete": (3, 10),
+}
+PROTECTION_SECTIONS = [
+    ("Overview", "overview", "Status and master switch"),
+    ("Anti-nuke", "nuke", "Mass deletes, bans and kicks"),
+    ("Anti-webhook", "webhook", "Block unauthorized webhooks"),
+    ("Anti-raid", "raid", "Join floods and new accounts"),
+    ("Trusted", "trusted", "Users and roles that skip checks"),
+    ("Logs", "logs", "Where alerts are sent"),
+]
+
+DEFAULT_ANTIRAID = {
+    "enabled": True,
+    "log_channel": None,
+    "trusted_users": [],
+    "trusted_roles": [],
+    "nuke": {
+        key: {"enabled": True, "limit": limit, "seconds": seconds, "punish": "ban"}
+        for key, (limit, seconds) in NUKE_DEFAULTS.items()
+    },
+    "webhook": {"enabled": True, "limit": 1, "seconds": 60, "punish": "ban"},
+    "raid": {
+        "join_enabled": True,
+        "joins": 8,
+        "seconds": 10,
+        "lockdown_minutes": 10,
+        "age_enabled": False,
+        "min_age_days": 7,
+    },
+}
+
+antiraid_config: dict[str, dict] = {}
+_seen_entries: set[int] = set()
+_hits: dict[tuple, deque] = {}
+_joins: dict[int, deque] = {}
+_raid_until: dict[int, float] = {}
+_prev_verification: dict[int, discord.VerificationLevel] = {}
+
+
+def _merge(defaults: dict, data: dict) -> dict:
+    out = copy.deepcopy(defaults)
+    for key, value in data.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def load_antiraid() -> None:
+    global antiraid_config
+    try:
+        data = json.loads(ANTIRAID_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {}
+    antiraid_config = {gid: _merge(DEFAULT_ANTIRAID, cfg) for gid, cfg in data.items()}
+
+
+def save_antiraid() -> None:
+    ANTIRAID_FILE.write_text(json.dumps(antiraid_config, indent=2), encoding="utf-8")
+
+
+def guild_cfg(gid: int) -> dict:
+    key = str(gid)
+    if key not in antiraid_config:
+        antiraid_config[key] = copy.deepcopy(DEFAULT_ANTIRAID)
+    return antiraid_config[key]
+
+
+def _get(cfg: dict, path: tuple):
+    for part in path:
+        cfg = cfg[part]
+    return cfg
+
+
+def _set(cfg: dict, path: tuple, value) -> None:
+    *head, last = path
+    _get(cfg, tuple(head))[last] = value
+
+
+def _trusted(guild: discord.Guild, who) -> bool:
+    uid = getattr(who, "id", who)
+    if uid == guild.owner_id or (bot.user and uid == bot.user.id):
+        return True
+    cfg = guild_cfg(guild.id)
+    if uid in cfg["trusted_users"]:
+        return True
+    member = who if isinstance(who, discord.Member) else guild.get_member(uid)
+    return member is not None and any(role.id in cfg["trusted_roles"] for role in member.roles)
+
+
+async def _audit_entry(guild: discord.Guild, action, target_id: int | None = None, max_age: int = 20):
+    try:
+        async for entry in guild.audit_logs(limit=25, action=action):
+            if (discord.utils.utcnow() - entry.created_at).total_seconds() > max_age:
+                break
+            if target_id is not None and getattr(entry.target, "id", None) != target_id:
+                continue
+            if entry.id in _seen_entries:
+                continue
+            if len(_seen_entries) > 5000:
+                _seen_entries.clear()
+            _seen_entries.add(entry.id)
+            return entry
+    except discord.Forbidden:
+        print("[antiraid] missing View Audit Log permission")
+    except discord.HTTPException as exc:
+        print(f"[antiraid] audit log error: {exc}")
+    return None
+
+
+async def _alarm(guild: discord.Guild, title: str, lines: list[str], color: int = ERROR) -> None:
+    channel_id = guild_cfg(guild.id)["log_channel"]
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if channel is None:
+        return
+    try:
+        await channel.send(embed=base_embed(title, "\n".join(lines), color), allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as exc:
+        print(f"[antiraid] could not post alert: {exc}")
+
+
+async def _punish(guild: discord.Guild, user_id: int, how: str, reason: str) -> str:
+    if user_id == guild.owner_id or (bot.user and user_id == bot.user.id):
+        return "skipped"
+    member = guild.get_member(user_id)
+    if member is None and how != "ban":
+        return "not in the server"
+    if member is not None and member.top_role >= guild.me.top_role:
+        return "role is too high for me"
+    try:
+        if how == "ban":
+            await guild.ban(member or discord.Object(id=user_id), reason=reason, delete_message_days=0)
+        elif how == "kick":
+            await member.kick(reason=reason)
+        else:
+            roles = [r for r in member.roles if not r.is_default() and not r.managed and r < guild.me.top_role]
+            if not roles:
+                return "no roles to remove"
+            await member.remove_roles(*roles, reason=reason)
+    except discord.HTTPException as exc:
+        return f"failed: {exc.text or exc}"
+    return "done"
+
+
+async def _record_hit(guild: discord.Guild, label: str, rule: dict, executor) -> None:
+    if executor is None or _trusted(guild, executor):
+        return
+    key = (guild.id, executor.id, label)
+    times = _hits.setdefault(key, deque())
+    now = time.monotonic()
+    times.append(now)
+    while times and now - times[0] > rule["seconds"]:
+        times.popleft()
+    if len(times) < rule["limit"]:
+        return
+    times.clear()
+    result = await _punish(guild, executor.id, rule["punish"], f"Anti-nuke: {label}")
+    await _alarm(
+        guild,
+        f"{E('Error', '⚠️')} Anti-nuke triggered",
+        [
+            f"**Action:** {label}",
+            f"**User:** {executor.mention} (`{executor.id}`)",
+            f"**Limit:** {rule['limit']} in {rule['seconds']}s",
+            f"**Punishment:** {PUNISH_LABELS[rule['punish']]} · {result}",
+        ],
+    )
+
+
+async def _nuke_event(guild: discord.Guild, key: str, target_id: int | None = None) -> None:
+    cfg = guild_cfg(guild.id)
+    rule = cfg["nuke"][key]
+    if not cfg["enabled"] or not rule["enabled"]:
+        return
+    label, action = NUKE_RULES[key]
+    entry = await _audit_entry(guild, action, target_id)
+    if entry is not None:
+        await _record_hit(guild, label, rule, entry.user)
+
+
+@bot.event
+async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
+    await _nuke_event(channel.guild, "channel_delete", channel.id)
+
+
+@bot.event
+async def on_guild_channel_create(channel: discord.abc.GuildChannel):
+    await _nuke_event(channel.guild, "channel_create", channel.id)
+
+
+@bot.event
+async def on_guild_role_delete(role: discord.Role):
+    await _nuke_event(role.guild, "role_delete", role.id)
+
+
+@bot.event
+async def on_guild_role_create(role: discord.Role):
+    await _nuke_event(role.guild, "role_create", role.id)
+
+
+@bot.event
+async def on_member_ban(guild: discord.Guild, user: discord.User):
+    await _nuke_event(guild, "ban", user.id)
+
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    await _nuke_event(member.guild, "kick", member.id)
+
+
+@bot.event
+async def on_guild_emojis_update(guild: discord.Guild, before, after):
+    kept = {e.id for e in after}
+    for emoji in before:
+        if emoji.id not in kept:
+            await _nuke_event(guild, "emoji_delete", emoji.id)
+
+
+@bot.event
+async def on_webhooks_update(channel: discord.abc.GuildChannel):
+    guild = channel.guild
+    cfg = guild_cfg(guild.id)
+    if not cfg["enabled"] or not cfg["webhook"]["enabled"]:
+        return
+    entry = await _audit_entry(guild, discord.AuditLogAction.webhook_create)
+    if entry is None or entry.user is None or _trusted(guild, entry.user):
+        return
+    hook_id = getattr(entry.target, "id", None)
+    if hook_id:
+        try:
+            hook = await bot.fetch_webhook(hook_id)
+            await hook.delete(reason="Anti-webhook: unauthorized webhook")
+        except discord.HTTPException:
+            pass
+    await _alarm(
+        guild,
+        f"{E('GE_Lock', '🔒')} Webhook blocked",
+        [f"**Channel:** {channel.mention}", f"**Created by:** {entry.user.mention} (`{entry.user.id}`)"],
+    )
+    await _record_hit(guild, "Webhook created", cfg["webhook"], entry.user)
+
+
+async def _kick_join(member: discord.Member, reason: str) -> None:
+    try:
+        await member.kick(reason=reason)
+    except discord.HTTPException:
+        pass
+
+
+async def _end_lockdown(guild: discord.Guild, seconds: float) -> None:
+    await asyncio.sleep(seconds)
+    if _raid_until.get(guild.id, 0) > time.time():
+        return
+    _raid_until.pop(guild.id, None)
+    previous = _prev_verification.pop(guild.id, None)
+    if previous is not None:
+        try:
+            await guild.edit(verification_level=previous, reason="Anti-raid lockdown ended")
+        except discord.HTTPException:
+            pass
+    await _alarm(guild, f"{E('true', '✅')} Lockdown ended", ["Verification level was restored."], STEEL)
+
+
+async def _antiraid_join(member: discord.Member) -> bool:
+    guild = member.guild
+    cfg = guild_cfg(guild.id)
+    if not cfg["enabled"]:
+        return False
+    raid = cfg["raid"]
+    now = time.time()
+
+    if raid["age_enabled"] and (discord.utils.utcnow() - member.created_at).days < raid["min_age_days"]:
+        await _kick_join(member, "Anti-raid: account too new")
+        return True
+
+    if _raid_until.get(guild.id, 0) > now:
+        await _kick_join(member, "Anti-raid lockdown")
+        return True
+
+    if not raid["join_enabled"]:
+        return False
+    times = _joins.setdefault(guild.id, deque())
+    times.append(now)
+    while times and now - times[0] > raid["seconds"]:
+        times.popleft()
+    if len(times) < raid["joins"]:
+        return False
+
+    times.clear()
+    minutes = raid["lockdown_minutes"]
+    _raid_until[guild.id] = now + minutes * 60
+    if guild.id not in _prev_verification:
+        _prev_verification[guild.id] = guild.verification_level
+    try:
+        await guild.edit(verification_level=discord.VerificationLevel.highest, reason="Anti-raid lockdown")
+    except discord.HTTPException:
+        pass
+    asyncio.create_task(_end_lockdown(guild, minutes * 60))
+    await _alarm(
+        guild,
+        f"{E('warn3', '⚠️')} Raid detected",
+        [
+            f"**Joins:** {raid['joins']} in {raid['seconds']}s",
+            f"**Lockdown:** {minutes} min · verification set to highest",
+            "New joins are kicked until the lockdown ends.",
+        ],
+    )
+    await _kick_join(member, "Anti-raid lockdown")
+    return True
+
+
+def _guard(guild: discord.Guild, fn):
+    async def callback(interaction: discord.Interaction):
+        if interaction.user.id != guild.owner_id:
+            return await interaction.response.send_message(
+                embed=error_notice("Only the server owner can change protection settings."), ephemeral=True
+            )
+        await fn(interaction)
+    return callback
+
+
+def _button(guild: discord.Guild, label: str, emoji: str, style: discord.ButtonStyle, fn) -> discord.ui.Button:
+    button = discord.ui.Button(label=label, emoji=emoji, style=style)
+    button.callback = _guard(guild, fn)
+    return button
+
+
+def _toggle_action(guild: discord.Guild, path: tuple, section: str, rule_key: str = "channel_delete"):
+    async def fn(interaction: discord.Interaction):
+        cfg = guild_cfg(guild.id)
+        _set(cfg, path, not _get(cfg, path))
+        save_antiraid()
+        await interaction.response.edit_message(view=build_protection_layout(guild, section, rule_key))
+    return fn
+
+
+def _cycle_action(guild: discord.Guild, path: tuple, section: str, rule_key: str = "channel_delete"):
+    async def fn(interaction: discord.Interaction):
+        cfg = guild_cfg(guild.id)
+        current = _get(cfg, path)
+        _set(cfg, path, PUNISH_ORDER[(PUNISH_ORDER.index(current) + 1) % len(PUNISH_ORDER)])
+        save_antiraid()
+        await interaction.response.edit_message(view=build_protection_layout(guild, section, rule_key))
+    return fn
+
+
+def _modal_action(guild: discord.Guild, title: str, fields: list, section: str, rule_key: str = "channel_delete"):
+    async def fn(interaction: discord.Interaction):
+        await interaction.response.send_modal(NumbersModal(guild, title, fields, section, rule_key))
+    return fn
+
+
+def _picker_action(guild: discord.Guild, kind: str, mode: str):
+    async def fn(interaction: discord.Interaction):
+        verb = "Pick the members" if kind == "user" else "Pick the roles"
+        verb += " to trust." if mode == "add" else " to stop trusting."
+        await interaction.response.send_message(
+            embed=notice(verb), view=TrustPicker(guild, kind, mode), ephemeral=True
+        )
+    return fn
+
+
+class NumbersModal(discord.ui.Modal):
+    def __init__(self, guild: discord.Guild, title: str, fields: list, section: str, rule_key: str):
+        super().__init__(title=title[:45], timeout=300)
+        self.guild = guild
+        self.fields = fields
+        self.section = section
+        self.rule_key = rule_key
+        cfg = guild_cfg(guild.id)
+        self.inputs: list[discord.ui.TextInput] = []
+        for label, path, _lo, _hi in fields:
+            text_input = discord.ui.TextInput(label=label[:45], default=str(_get(cfg, path)), max_length=6)
+            self.add_item(text_input)
+            self.inputs.append(text_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.guild.owner_id:
+            return await interaction.response.send_message(
+                embed=error_notice("Only the server owner can change protection settings."), ephemeral=True
+            )
+        values = []
+        for (label, path, low, high), text_input in zip(self.fields, self.inputs):
+            try:
+                value = int(text_input.value.strip())
+            except ValueError:
+                return await interaction.response.send_message(
+                    embed=error_notice(f"**{label}** must be a number."), ephemeral=True
+                )
+            if not low <= value <= high:
+                return await interaction.response.send_message(
+                    embed=error_notice(f"**{label}** must be between {low} and {high}."), ephemeral=True
+                )
+            values.append((path, value))
+        cfg = guild_cfg(self.guild.id)
+        for path, value in values:
+            _set(cfg, path, value)
+        save_antiraid()
+        await interaction.response.send_message(
+            view=build_protection_layout(self.guild, self.section, self.rule_key), ephemeral=True
+        )
+
+
+class TrustPicker(discord.ui.View):
+    def __init__(self, guild: discord.Guild, kind: str, mode: str):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.kind = kind
+        self.mode = mode
+        if kind == "user":
+            self.picker = discord.ui.UserSelect(placeholder="Choose members…", min_values=1, max_values=10)
+        else:
+            self.picker = discord.ui.RoleSelect(placeholder="Choose roles…", min_values=1, max_values=10)
+        self.picker.callback = _guard(guild, self._pick)
+        self.add_item(self.picker)
+
+    async def _pick(self, interaction: discord.Interaction):
+        cfg = guild_cfg(self.guild.id)
+        key = "trusted_users" if self.kind == "user" else "trusted_roles"
+        ids = cfg[key]
+        for item in self.picker.values:
+            if self.mode == "add" and item.id not in ids:
+                ids.append(item.id)
+            elif self.mode == "remove" and item.id in ids:
+                ids.remove(item.id)
+        save_antiraid()
+        await interaction.response.edit_message(
+            embed=notice(f"{E('true', '✅')} Trusted list updated."), view=None
+        )
+
+
+def _status(flag: bool) -> str:
+    return E("true", "✅") if flag else E("false", "❌")
+
+
+def _overview_section(guild, cfg, rule_key):
+    raid = cfg["raid"]
+    nuke_on = sum(1 for r in cfg["nuke"].values() if r["enabled"])
+    log = f"<#{cfg['log_channel']}>" if cfg["log_channel"] else "Not set"
+    text = (
+        f"{_status(cfg['enabled'])} **Protection** · {'Active' if cfg['enabled'] else 'Paused'}\n\n"
+        f"{E('Error', '⚠️')} **Anti-nuke** · {nuke_on} of {len(NUKE_RULES)} rules on\n"
+        f"{E('GE_Lock', '🔒')} **Anti-webhook** · {'On' if cfg['webhook']['enabled'] else 'Off'}\n"
+        f"{E('warn3', '⚠️')} **Anti-raid** · joins {'on' if raid['join_enabled'] else 'off'} · "
+        f"new accounts {'on' if raid['age_enabled'] else 'off'}\n"
+        f"{E('Estrella', '⭐')} **Trusted** · {len(cfg['trusted_users'])} users · {len(cfg['trusted_roles'])} roles\n"
+        f"{E('support', '📝')} **Logs** · {log}"
+    )
+    rows = [discord.ui.ActionRow(_button(
+        guild, "Protection on" if cfg["enabled"] else "Protection off", E("synexprotect", "🛡️"),
+        discord.ButtonStyle.success if cfg["enabled"] else discord.ButtonStyle.danger,
+        _toggle_action(guild, ("enabled",), "overview"),
+    ))]
+    return text, rows
+
+
+def _nuke_section(guild, cfg, rule_key):
+    lines = [
+        f"{_status(rule['enabled'])} **{label}** · {rule['limit']} in {rule['seconds']}s · {PUNISH_LABELS[rule['punish']]}"
+        for key, (label, _action) in NUKE_RULES.items()
+        for rule in [cfg["nuke"][key]]
+    ]
+    text = (
+        "Each rule counts actions per person. When someone goes over the limit inside the time window, "
+        "the punishment is applied.\n\n" + "\n".join(lines)
+    )
+
+    async def pick(interaction: discord.Interaction):
+        await interaction.response.edit_message(view=build_protection_layout(guild, "nuke", select.values[0]))
+
+    select = discord.ui.Select(
+        placeholder="Choose a rule…",
+        min_values=1,
+        max_values=1,
+        options=[
+            discord.SelectOption(label=label, value=key, default=key == rule_key)
+            for key, (label, _action) in NUKE_RULES.items()
+        ],
+    )
+    select.callback = _guard(guild, pick)
+
+    rule = cfg["nuke"][rule_key]
+    path = ("nuke", rule_key)
+    rows = [
+        discord.ui.ActionRow(select),
+        discord.ui.ActionRow(
+            _button(guild, "Rule on" if rule["enabled"] else "Rule off", E("synexprotect", "🛡️"),
+                    discord.ButtonStyle.success if rule["enabled"] else discord.ButtonStyle.secondary,
+                    _toggle_action(guild, path + ("enabled",), "nuke", rule_key)),
+            _button(guild, "Edit limits", E("support", "✏️"), discord.ButtonStyle.secondary,
+                    _modal_action(guild, f"{NUKE_RULES[rule_key][0]} limits", [
+                        ("Actions allowed", path + ("limit",), 1, 50),
+                        ("Within seconds", path + ("seconds",), 1, 3600),
+                    ], "nuke", rule_key)),
+            _button(guild, f"Punish: {PUNISH_LABELS[rule['punish']]}", E("Error", "⚠️"),
+                    discord.ButtonStyle.secondary, _cycle_action(guild, path + ("punish",), "nuke", rule_key)),
+        ),
+    ]
+    return text, rows
+
+
+def _webhook_section(guild, cfg, rule_key):
+    hook = cfg["webhook"]
+    text = (
+        f"{_status(hook['enabled'])} **Block webhook creation** · punishment: {PUNISH_LABELS[hook['punish']]}\n\n"
+        "Any webhook created by someone who is not trusted is deleted right away, and the creator gets the "
+        "punishment below. Trusted members and roles can still create webhooks."
+    )
+    rows = [discord.ui.ActionRow(
+        _button(guild, "Webhook on" if hook["enabled"] else "Webhook off", E("GE_Lock", "🔒"),
+                discord.ButtonStyle.success if hook["enabled"] else discord.ButtonStyle.secondary,
+                _toggle_action(guild, ("webhook", "enabled"), "webhook")),
+        _button(guild, f"Punish: {PUNISH_LABELS[hook['punish']]}", E("Error", "⚠️"),
+                discord.ButtonStyle.secondary, _cycle_action(guild, ("webhook", "punish"), "webhook")),
+    )]
+    return text, rows
+
+
+def _raid_section(guild, cfg, rule_key):
+    raid = cfg["raid"]
+    text = (
+        f"{_status(raid['join_enabled'])} **Join flood** · {raid['joins']} joins in {raid['seconds']}s\n"
+        f"-# When it happens: verification goes to highest for {raid['lockdown_minutes']} min and new joins are kicked.\n\n"
+        f"{_status(raid['age_enabled'])} **New accounts** · kick accounts younger than {raid['min_age_days']} days"
+    )
+    rows = [
+        discord.ui.ActionRow(
+            _button(guild, "Join flood on" if raid["join_enabled"] else "Join flood off", E("warn3", "⚠️"),
+                    discord.ButtonStyle.success if raid["join_enabled"] else discord.ButtonStyle.secondary,
+                    _toggle_action(guild, ("raid", "join_enabled"), "raid")),
+            _button(guild, "Edit flood limits", E("support", "✏️"), discord.ButtonStyle.secondary,
+                    _modal_action(guild, "Join flood limits", [
+                        ("Joins allowed", ("raid", "joins"), 2, 100),
+                        ("Within seconds", ("raid", "seconds"), 1, 600),
+                        ("Lockdown minutes", ("raid", "lockdown_minutes"), 1, 1440),
+                    ], "raid")),
+        ),
+        discord.ui.ActionRow(
+            _button(guild, "New accounts on" if raid["age_enabled"] else "New accounts off", E("GE_member", "👤"),
+                    discord.ButtonStyle.success if raid["age_enabled"] else discord.ButtonStyle.secondary,
+                    _toggle_action(guild, ("raid", "age_enabled"), "raid")),
+            _button(guild, "Edit account age", E("support", "✏️"), discord.ButtonStyle.secondary,
+                    _modal_action(guild, "New account filter", [
+                        ("Minimum account age (days)", ("raid", "min_age_days"), 1, 365),
+                    ], "raid")),
+        ),
+    ]
+    return text, rows
+
+
+def _trusted_section(guild, cfg, rule_key):
+    users = cfg["trusted_users"]
+    roles = cfg["trusted_roles"]
+    user_text = " ".join(f"<@{u}>" for u in users[:20]) or "None"
+    if len(users) > 20:
+        user_text += f" +{len(users) - 20} more"
+    role_text = " ".join(f"<@&{r}>" for r in roles[:20]) or "None"
+    if len(roles) > 20:
+        role_text += f" +{len(roles) - 20} more"
+    text = (
+        "Trusted members and roles skip every check. The server owner is always trusted.\n\n"
+        f"**Members** · {user_text}\n**Roles** · {role_text}"
+    )
+    rows = [discord.ui.ActionRow(
+        _button(guild, "Add member", E("true", "✅"), discord.ButtonStyle.success, _picker_action(guild, "user", "add")),
+        _button(guild, "Remove member", E("false", "❌"), discord.ButtonStyle.danger, _picker_action(guild, "user", "remove")),
+        _button(guild, "Add role", E("true", "✅"), discord.ButtonStyle.success, _picker_action(guild, "role", "add")),
+        _button(guild, "Remove role", E("false", "❌"), discord.ButtonStyle.danger, _picker_action(guild, "role", "remove")),
+    )]
+    return text, rows
+
+
+def _logs_section(guild, cfg, rule_key):
+    channel = f"<#{cfg['log_channel']}>" if cfg["log_channel"] else "Not set"
+    text = f"Anti-nuke, anti-webhook and anti-raid alerts are posted here.\n\n**Channel** · {channel}"
+
+    async def pick(interaction: discord.Interaction):
+        guild_cfg(guild.id)["log_channel"] = select.values[0].id
+        save_antiraid()
+        await interaction.response.edit_message(view=build_protection_layout(guild, "logs"))
+
+    async def clear(interaction: discord.Interaction):
+        guild_cfg(guild.id)["log_channel"] = None
+        save_antiraid()
+        await interaction.response.edit_message(view=build_protection_layout(guild, "logs"))
+
+    select = discord.ui.ChannelSelect(
+        channel_types=[discord.ChannelType.text],
+        placeholder="Choose the alerts channel…",
+        min_values=1,
+        max_values=1,
+    )
+    select.callback = _guard(guild, pick)
+    rows = [
+        discord.ui.ActionRow(select),
+        discord.ui.ActionRow(_button(guild, "Clear channel", E("false", "❌"), discord.ButtonStyle.danger, clear)),
+    ]
+    return text, rows
+
+
+SECTION_BUILDERS = {
+    "overview": _overview_section,
+    "nuke": _nuke_section,
+    "webhook": _webhook_section,
+    "raid": _raid_section,
+    "trusted": _trusted_section,
+    "logs": _logs_section,
+}
+
+
+def build_protection_layout(guild: discord.Guild, section: str = "overview", rule_key: str = "channel_delete") -> discord.ui.LayoutView:
+    cfg = guild_cfg(guild.id)
+
+    nav = discord.ui.Select(
+        placeholder="Choose a module…",
+        min_values=1,
+        max_values=1,
+        options=[
+            discord.SelectOption(label=label, value=value, description=desc, default=value == section)
+            for label, value, desc in PROTECTION_SECTIONS
+        ],
+    )
+
+    async def go(interaction: discord.Interaction):
+        await interaction.response.edit_message(view=build_protection_layout(guild, nav.values[0]))
+
+    nav.callback = _guard(guild, go)
+
+    body, rows = SECTION_BUILDERS.get(section, _overview_section)(guild, cfg, rule_key)
+    children = [
+        discord.ui.TextDisplay(f"### {E('synexprotect', '🛡️')} Protection Panel\n-# {guild.name} · Owner only"),
+        discord.ui.Separator(),
+        discord.ui.ActionRow(nav),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(body),
+        *rows,
+        discord.ui.TextDisplay("-# Changes apply right away"),
+    ]
+    view = discord.ui.LayoutView(timeout=900)
+    view.add_item(discord.ui.Container(*children, accent_colour=CHARCOAL))
+    return view
+
+
+@bot.tree.command(name="antiraid", description="Open the anti-raid and protection panel. Server owner only.")
+@app_commands.guild_only()
+async def antiraid_cmd(interaction: discord.Interaction):
+    if interaction.user.id != interaction.guild.owner_id:
+        return await interaction.response.send_message(
+            embed=error_notice("Only the server owner can open the protection panel."), ephemeral=True
+        )
+    await interaction.response.send_message(view=build_protection_layout(interaction.guild), ephemeral=True)
+
 
 if __name__ == "__main__":
     if not TOKEN:
