@@ -1,11 +1,11 @@
 import asyncio
 import copy
 import time
+import traceback
 from collections import deque
 import io
 import json
 import os
-import platform
 import random
 import re
 import uuid
@@ -44,6 +44,50 @@ giveaways: dict[int, dict] = {}
 
 DATA_DIR = Path(os.getenv("DATA_DIR") or Path(__file__).parent)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def write_json_atomic(path: Path, data) -> None:
+    """Write JSON to a temp file and swap it in, so a crash never leaves a half-written file."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+_background_tasks: set[asyncio.Task] = set()
+
+
+def spawn(coro) -> asyncio.Task:
+    """create_task that keeps a strong reference (the event loop only keeps weak ones, so a
+    fire-and-forget task can be garbage-collected mid-run) and reports failures instead of hiding them."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _background_tasks.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            print(f"[task] {t.get_name()} failed: {t.exception()!r}")
+
+    task.add_done_callback(_done)
+    return task
+
+
+def read_json(path: Path, default=None):
+    """Read a JSON file. Missing file -> default. Corrupt file -> moved aside as .corrupt-<time>
+    so the next save can't overwrite the only copy of the data."""
+    fallback = {} if default is None else default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return fallback
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        backup = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+        try:
+            os.replace(path, backup)
+        except OSError:
+            pass
+        print(f"[data] {path.name} is corrupt ({exc}); moved to {backup.name} and starting empty")
+        return fallback
+
 REACTION_ROLES_FILE = DATA_DIR / "reaction_roles.json"
 reaction_roles: dict[str, list[dict]] = {}
 
@@ -86,8 +130,34 @@ def base_embed(title: str | None = None, description: str | None = None, color: 
 def notice(text: str, color: int = CHARCOAL) -> discord.Embed:
     return discord.Embed(description=text, color=color)
 
+_emoji_cache: dict[str, str] | None = None
+
+
+async def _invalidate_emoji_cache(*_args) -> None:
+    global _emoji_cache
+    _emoji_cache = None
+
+
+for _event in ("on_ready", "on_guild_join", "on_guild_remove", "on_guild_available",
+               "on_guild_unavailable", "on_guild_emojis_update"):
+    bot.add_listener(_invalidate_emoji_cache, _event)
+
+
 def E(names, fallback: str = "") -> str:
+    """Look up a custom emoji by name (case-insensitive) across every server the bot is in.
+    E() runs on almost every embed, so the name index is cached once the bot is ready."""
+    global _emoji_cache
     wanted = [names] if isinstance(names, str) else list(names)
+    if bot.is_ready():
+        if _emoji_cache is None:
+            _emoji_cache = {}
+            for emoji in bot.emojis:
+                _emoji_cache.setdefault(emoji.name.lower(), str(emoji))
+        for name in wanted:
+            found = _emoji_cache.get(name.lower())
+            if found:
+                return found
+        return fallback
     for name in wanted:
         for emoji in bot.emojis:
             if emoji.name.lower() == name.lower():
@@ -99,13 +169,10 @@ def error_notice(text: str) -> discord.Embed:
 
 def load_reaction_roles() -> None:
     global reaction_roles
-    try:
-        reaction_roles = json.loads(REACTION_ROLES_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        reaction_roles = {}
+    reaction_roles = read_json(REACTION_ROLES_FILE)
 
 def save_reaction_roles() -> None:
-    REACTION_ROLES_FILE.write_text(json.dumps(reaction_roles, indent=2), encoding="utf-8")
+    write_json_atomic(REACTION_ROLES_FILE, reaction_roles)
 
 def emoji_key_from_partial(emoji: discord.PartialEmoji) -> str:
     return f"c{emoji.id}" if emoji.id else str(emoji.name).replace("\ufe0f", "")
@@ -350,29 +417,31 @@ def build_avatar(user: discord.abc.User) -> tuple[discord.Embed, discord.ui.View
 
 @bot.event
 async def on_ready():
+    # on_ready also fires after every gateway reconnect; only the invite cache needs a refresh then.
+    for guild in bot.guilds:
+        await _refresh_invites(guild)
+    if getattr(bot, "_startup_done", False):
+        print(f"{BOT_NAME} reconnected ({len(bot.guilds)} servers)")
+        return
+    bot._startup_done = True
     load_reaction_roles()
     load_tickets()
     load_welcomes()
     load_autoroles()
     load_antiraid()
     load_modlog()
-    for guild in bot.guilds:
-        await _refresh_invites(guild)
+    restore_giveaways()
     await _sync_tickets_from_discord()
     bot.add_view(build_panel_view())
     for ticket in ticket_data["open"].values():
         if ticket.get("message_id"):
             bot.add_view(ticket_layout(ticket), message_id=ticket["message_id"])
-    if not getattr(bot, "_tickets_loop_started", False):
-        bot._tickets_loop_started = True
-        asyncio.create_task(_inactivity_loop())
-    if not getattr(bot, "_global_cleared", False):
-        bot._global_cleared = True
-        try:
-            await bot.http.bulk_upsert_global_commands(bot.application_id, payload=[])
-            print("[sync] global commands cleared (commands live per server only)")
-        except discord.HTTPException as exc:
-            print(f"[sync] could not clear global commands: {exc}")
+    spawn(_inactivity_loop())
+    try:
+        await bot.http.bulk_upsert_global_commands(bot.application_id, payload=[])
+        print("[sync] global commands cleared (commands live per server only)")
+    except discord.HTTPException as exc:
+        print(f"[sync] could not clear global commands: {exc}")
     for guild in bot.guilds:
         await _sync_guild_commands(guild)
     print(f"{BOT_NAME} online as {bot.user} ({len(bot.guilds)} servers)")
@@ -390,7 +459,8 @@ async def on_guild_join(guild: discord.Guild):
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
     if isinstance(error, (commands.CommandNotFound, commands.CheckFailure, commands.NoPrivateMessage)):
         return
-    print(f"[prefix error] {error}")
+    print(f"[prefix error] {ctx.command}: {error!r}")
+    traceback.print_exception(type(error), error, error.__traceback__)
 
 def _find_rule(guild_id: int, emoji: discord.PartialEmoji, message_id: int) -> dict | None:
     key = emoji_key_from_partial(emoji)
@@ -498,15 +568,26 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         text = "You don't have permission to use this command."
     elif isinstance(error, app_commands.BotMissingPermissions):
         text = "I'm missing the permissions needed to run this command."
+    elif isinstance(error, app_commands.CommandOnCooldown):
+        text = f"Slow down! Try again in {error.retry_after:.0f}s."
+    elif isinstance(error, app_commands.NoPrivateMessage):
+        text = "This command only works inside a server."
+    elif isinstance(error, app_commands.CheckFailure):
+        text = "You can't use this command."
     else:
         text = "An unexpected error occurred. Please try again."
-        print(f"[error] {error}")
+        name = interaction.command.qualified_name if interaction.command else "?"
+        print(f"[error] /{name}: {error!r}")
+        traceback.print_exception(type(error), error, error.__traceback__)
 
     embed = error_notice(text)
-    if interaction.response.is_done():
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    else:
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+    except discord.HTTPException:
+        pass  # the interaction expired or was already answered; nothing left to tell the user
 
 @bot.tree.command(name="bot-say", description="Send a message through the bot without revealing who sent it.")
 @app_commands.describe(message="The message to send", channel="Channel to send it in (default: this one)")
@@ -514,6 +595,15 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 @app_commands.guild_only()
 async def bot_say(interaction: discord.Interaction, message: str, channel: discord.TextChannel | None = None):
     target = channel or interaction.channel
+    if not target.permissions_for(interaction.user).send_messages:
+        return await interaction.response.send_message(
+            embed=error_notice("You can't send messages in that channel."), ephemeral=True)
+    if not target.permissions_for(interaction.guild.me).send_messages:
+        return await interaction.response.send_message(
+            embed=error_notice("I can't send messages in that channel."), ephemeral=True)
+    if len(message) > 2000:
+        return await interaction.response.send_message(
+            embed=error_notice("Messages are limited to 2000 characters."), ephemeral=True)
     await target.send(message, allowed_mentions=discord.AllowedMentions(everyone=False, roles=False))
     await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Message sent to {target.mention}."), ephemeral=True)
 
@@ -788,11 +878,6 @@ ADMIN_COMMANDS = [
     ("autorol", "Give a role automatically to every new member.", "/autorol role", "Manage Roles"),
     ("autorol-off", "Stop giving the auto role to new members.", "/autorol-off", "Manage Roles"),
     ("welcomes-setup", "Send new member welcomes to a channel.", "/welcomes-setup channel", "Manage Server"),
-    ("welcomes-on", "Turn welcomes back on in the default channel.", "/welcomes-on", "Manage Server"),
-    ("welcomes-off", "Turn new member welcomes off.", "/welcomes-off", "Manage Server"),
-    ("welcomes-button", "Set a welcome button: position, text, https link and optional emoji.", "/welcomes-button slot label url [emoji]", "Manage Server"),
-    ("welcomes-button-remove", "Remove a welcome button by its position.", "/welcomes-button-remove slot", "Manage Server"),
-    ("welcomes-buttons-reset", "Restore the default welcome buttons.", "/welcomes-buttons-reset", "Manage Server"),
     ("tickets-log", "Ticket log: who opened it, who claimed it, duration, members and transcript.", "/tickets-log [number]", "Staff"),
     ("invites-setup", "Post a message whenever someone joins with an invite, with their invite count.", "/invites-setup channel", "Manage Server"),
     ("invites-off", "Stop posting invite messages.", "/invites-off", "Manage Server"),
@@ -827,7 +912,7 @@ HELP_CATEGORIES = {
     "admin": [
         ("Giveaways", ["giveaway create", "giveaway end", "giveaway reroll"]),
         ("Tickets", ["tickets-setup", "categorytickets", "tickets-log", "tickets-settings"]),
-        ("Welcome & roles", ["welcomes-setup", "welcomes-on", "welcomes-off", "welcomes-button", "welcomes-button-remove", "welcomes-buttons-reset", "welcomes-settings", "autorol", "autorol-off", "autorol-settings", "addemojirole", "removeemojirole"]),
+        ("Welcome & roles", ["welcomes-setup", "welcomes-settings", "autorol", "autorol-off", "autorol-settings", "addemojirole", "removeemojirole"]),
         ("Invites & goodbyes", ["invites-setup", "invites-off", "invites-settings", "despedidas-setup", "despedidas-off", "despedidas-settings"]),
         ("Server name", ["servername", "servername-reset", "servername-settings"]),
         ("Moderation", ["ban", "unban", "kick", "mute", "unmute"]),
@@ -1082,7 +1167,7 @@ async def _start_timer(channel: discord.abc.Messageable, user: discord.abc.User,
     except discord.HTTPException as exc:
         print(f"[timer] could not post timer: {exc}")
         return False
-    asyncio.create_task(_finish_timer(channel, user, text, seconds))
+    spawn(_finish_timer(channel, user, text, seconds))
     return True
 
 def _parse_timer_time(time: str) -> int | None:
@@ -1386,6 +1471,7 @@ async def _join_callback(interaction: discord.Interaction):
         data["entries"].add(uid)
         msg = f"{E('true', '✅')} You're entered! Press the button again to leave."
 
+    request_giveaway_save()
     await interaction.response.edit_message(view=build_giveaway_layout(data))
     await interaction.followup.send(embed=notice(msg), ephemeral=True)
 
@@ -1439,25 +1525,68 @@ async def _refresh_giveaway_message(gid: int) -> None:
     except discord.HTTPException:
         pass
 
-async def _ticker(gid: int) -> None:
-    while True:
-        data = giveaways.get(gid)
-        if not data or data["ended"]:
-            return
-        remaining = data["ends_at"] - now_ts()
-        if remaining <= 0:
-            return
-        await asyncio.sleep(min(60, remaining))
-        await _refresh_giveaway_message(gid)
-
 async def _auto_end(gid: int, delay: int):
     await asyncio.sleep(delay)
     await _finish_giveaway(gid)
 
+GIVEAWAYS_FILE = DATA_DIR / "giveaways.json"
+_GIVEAWAY_SET_FIELDS = ("entries", "past_winners", "claimed")
+_giveaway_save_pending = False
+
+
+def save_giveaways() -> None:
+    """Persist only running giveaways; finished ones keep their claim state in memory as before."""
+    payload = {}
+    for mid, data in giveaways.items():
+        if data["ended"]:
+            continue
+        item = dict(data)
+        for field in _GIVEAWAY_SET_FIELDS:
+            item[field] = sorted(item[field])
+        payload[str(mid)] = item
+    write_json_atomic(GIVEAWAYS_FILE, payload)
+
+
+def request_giveaway_save() -> None:
+    """Debounced save for hot paths (every join/leave click) so we write at most once per 5 seconds."""
+    global _giveaway_save_pending
+    if _giveaway_save_pending:
+        return
+    _giveaway_save_pending = True
+
+    async def _later() -> None:
+        global _giveaway_save_pending
+        await asyncio.sleep(5)
+        _giveaway_save_pending = False
+        save_giveaways()
+
+    spawn(_later())
+
+
+def restore_giveaways() -> None:
+    """Bring running giveaways back after a restart: re-attach the buttons and re-schedule the ending."""
+    restored = 0
+    for key, item in read_json(GIVEAWAYS_FILE).items():
+        try:
+            mid = int(key)
+            for field in _GIVEAWAY_SET_FIELDS:
+                item[field] = set(item[field])
+            item["message_id"] = mid
+            giveaways[mid] = item
+            bot.add_view(build_giveaway_layout(item), message_id=mid)
+            spawn(_auto_end(mid, max(0, item["ends_at"] - now_ts())))
+            restored += 1
+        except (KeyError, TypeError, ValueError) as exc:
+            print(f"[giveaway] skipped a saved giveaway ({key}): {exc!r}")
+    if restored:
+        print(f"[giveaway] restored {restored} running giveaway(s)")
+
+
 def _register_giveaway(message: discord.Message, data: dict) -> None:
     data["message_id"] = message.id
     giveaways[message.id] = data
-    asyncio.create_task(_auto_end(message.id, data["seconds"]))
+    save_giveaways()
+    spawn(_auto_end(message.id, data["seconds"]))
 
 async def _resolve_user(uid: int) -> discord.User | None:
     user = bot.get_user(uid)
@@ -1694,7 +1823,7 @@ async def _announce_winner(gid: int, uid: int) -> None:
         except discord.HTTPException:
             pass
 
-    asyncio.create_task(_reclaim_watch(gid, uid, info["deadline"]))
+    spawn(_reclaim_watch(gid, uid, info["deadline"]))
 
 def _select_winners(gid: int, count: int) -> list[int]:
     data = giveaways[gid]
@@ -1733,6 +1862,7 @@ async def _finish_giveaway(gid: int, count: int | None = None) -> list[int]:
 
         data["ended"] = True
         data["ends_at"] = min(data["ends_at"], now_ts())
+        save_giveaways()
         chosen = _select_winners(gid, count or data["winners"])
         data["winners_list"] = list(chosen)
 
@@ -1979,14 +2109,10 @@ LINK_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 
 def load_tickets() -> None:
     global ticket_data
-    try:
-        loaded = json.loads(TICKETS_FILE.read_text(encoding="utf-8"))
-        ticket_data = {**ticket_data, **loaded}
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+    ticket_data = {**ticket_data, **read_json(TICKETS_FILE)}
 
 def save_tickets() -> None:
-    TICKETS_FILE.write_text(json.dumps(ticket_data, indent=2), encoding="utf-8")
+    write_json_atomic(TICKETS_FILE, ticket_data)
 
 def ticket_type(key: str) -> dict | None:
     return next((t for t in TICKET_TYPES if t["key"] == key), None)
@@ -2362,14 +2488,11 @@ ticket_history: dict[str, dict] = {}
 
 def load_ticket_history() -> None:
     global ticket_history
-    try:
-        ticket_history = json.loads(TICKET_HISTORY_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        ticket_history = {}
+    ticket_history = read_json(TICKET_HISTORY_FILE)
 
 
 def save_ticket_history() -> None:
-    TICKET_HISTORY_FILE.write_text(json.dumps(ticket_history, indent=2), encoding="utf-8")
+    write_json_atomic(TICKET_HISTORY_FILE, ticket_history)
 
 
 def _save_closed_ticket(channel, ticket: dict, closed_by: str, data: bytes | None, people: dict[str, str]) -> None:
@@ -2756,13 +2879,10 @@ welcome_config: dict[str, int] = {}
 
 def load_welcomes() -> None:
     global welcome_config
-    try:
-        welcome_config = json.loads(WELCOMES_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        welcome_config = {}
+    welcome_config = read_json(WELCOMES_FILE)
 
 def save_welcomes() -> None:
-    WELCOMES_FILE.write_text(json.dumps(welcome_config, indent=2), encoding="utf-8")
+    write_json_atomic(WELCOMES_FILE, welcome_config)
 
 WELCOME_LINKS = [
     ("See Rules", ["GE_rules"], "https://discord.com/channels/1557386505226420385/1557387851619106897"),
@@ -2777,14 +2897,11 @@ WELCOME_BUTTON_LIMIT = 5
 
 def load_welcome_buttons() -> None:
     global welcome_buttons_config
-    try:
-        welcome_buttons_config = json.loads(WELCOME_BUTTONS_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        welcome_buttons_config = {}
+    welcome_buttons_config = read_json(WELCOME_BUTTONS_FILE)
 
 
 def save_welcome_buttons() -> None:
-    WELCOME_BUTTONS_FILE.write_text(json.dumps(welcome_buttons_config, indent=2), encoding="utf-8")
+    write_json_atomic(WELCOME_BUTTONS_FILE, welcome_buttons_config)
 
 
 def welcome_buttons_for(guild_id: int) -> list[dict]:
@@ -2802,73 +2919,6 @@ def _welcome_button(btn: dict) -> discord.ui.Button:
 load_welcome_buttons()
 
 
-@bot.tree.command(name="welcomes-button", description="Set one welcome button: text, link and optional emoji.")
-@app_commands.describe(slot="Button position, 1 to 5", label="Button text", url="Link, starting with https://", emoji="Optional emoji")
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.guild_only()
-async def welcomes_button(
-    interaction: discord.Interaction,
-    slot: app_commands.Range[int, 1, WELCOME_BUTTON_LIMIT],
-    label: app_commands.Range[str, 1, 80],
-    url: str,
-    emoji: str | None = None,
-):
-    url = url.strip()
-    if not url.startswith("https://"):
-        return await interaction.response.send_message(embed=error_notice("The link must start with https://"), ephemeral=True)
-    emoji_value = None
-    if emoji and emoji.strip():
-        try:
-            discord.PartialEmoji.from_str(emoji.strip())
-        except (ValueError, TypeError):
-            return await interaction.response.send_message(embed=error_notice("That emoji is not valid."), ephemeral=True)
-        emoji_value = emoji.strip()
-    buttons = welcome_buttons_for(interaction.guild_id)
-    if slot > len(buttons) + 1:
-        return await interaction.response.send_message(
-            embed=error_notice(f"Fill slot {len(buttons) + 1} first."), ephemeral=True
-        )
-    entry = {"label": label.strip(), "url": url, "emoji": emoji_value}
-    if slot > len(buttons):
-        buttons.append(entry)
-    else:
-        buttons[slot - 1] = entry
-    welcome_buttons_config[str(interaction.guild_id)] = buttons
-    save_welcome_buttons()
-    await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} Welcome button {slot} saved: **{entry['label']}**."), ephemeral=True
-    )
-
-
-@bot.tree.command(name="welcomes-button-remove", description="Remove one welcome button by its position.")
-@app_commands.describe(slot="Button position, 1 to 5")
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.guild_only()
-async def welcomes_button_remove(interaction: discord.Interaction, slot: app_commands.Range[int, 1, WELCOME_BUTTON_LIMIT]):
-    buttons = welcome_buttons_for(interaction.guild_id)
-    if slot > len(buttons):
-        return await interaction.response.send_message(embed=error_notice("There is no button in that slot."), ephemeral=True)
-    if len(buttons) == 1:
-        return await interaction.response.send_message(
-            embed=error_notice("A welcome message needs at least one button."), ephemeral=True
-        )
-    buttons.pop(slot - 1)
-    welcome_buttons_config[str(interaction.guild_id)] = buttons
-    save_welcome_buttons()
-    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Welcome button {slot} removed."), ephemeral=True)
-
-
-@bot.tree.command(name="welcomes-buttons-reset", description="Restore the default welcome buttons.")
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.guild_only()
-async def welcomes_buttons_reset(interaction: discord.Interaction):
-    welcome_buttons_config.pop(str(interaction.guild_id), None)
-    save_welcome_buttons()
-    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Default welcome buttons restored."), ephemeral=True)
-
 
 GOODBYES_FILE = DATA_DIR / "goodbyes.json"
 goodbye_config: dict[str, int] = {}
@@ -2876,14 +2926,11 @@ goodbye_config: dict[str, int] = {}
 
 def load_goodbyes() -> None:
     global goodbye_config
-    try:
-        goodbye_config = json.loads(GOODBYES_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        goodbye_config = {}
+    goodbye_config = read_json(GOODBYES_FILE)
 
 
 def save_goodbyes() -> None:
-    GOODBYES_FILE.write_text(json.dumps(goodbye_config, indent=2), encoding="utf-8")
+    write_json_atomic(GOODBYES_FILE, goodbye_config)
 
 
 async def _send_goodbye(member: discord.Member) -> None:
@@ -2931,14 +2978,11 @@ guild_langs: dict[str, str] = {}
 
 def load_languages() -> None:
     global guild_langs
-    try:
-        guild_langs = json.loads(LANGUAGES_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        guild_langs = {}
+    guild_langs = read_json(LANGUAGES_FILE)
 
 
 def save_languages() -> None:
-    LANGUAGES_FILE.write_text(json.dumps(guild_langs, indent=2), encoding="utf-8")
+    write_json_atomic(LANGUAGES_FILE, guild_langs)
 
 
 STRINGS = {
@@ -3102,14 +3146,11 @@ server_names: dict[str, str] = {}
 
 def load_server_names() -> None:
     global server_names
-    try:
-        server_names = json.loads(SERVER_NAMES_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        server_names = {}
+    server_names = read_json(SERVER_NAMES_FILE)
 
 
 def save_server_names() -> None:
-    SERVER_NAMES_FILE.write_text(json.dumps(server_names, indent=2), encoding="utf-8")
+    write_json_atomic(SERVER_NAMES_FILE, server_names)
 
 
 def server_name(guild: discord.Guild) -> str:
@@ -3222,28 +3263,6 @@ async def autorol_settings(interaction: discord.Interaction):
         value = role.mention
     await interaction.response.send_message(embed=_settings_embed("Auto role settings", [("Role", value)]), ephemeral=True)
 
-@bot.tree.command(name="welcomes-on", description="Turn welcomes back on in the default welcome channel.")
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.guild_only()
-async def welcomes_on(interaction: discord.Interaction):
-    welcome_config.pop(str(interaction.guild_id), None)
-    save_welcomes()
-    channel = interaction.guild.get_channel(DEFAULT_WELCOME_CHANNEL_ID)
-    where = channel.mention if channel else f"`{DEFAULT_WELCOME_CHANNEL_ID}`"
-    await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} Welcomes are on in {where}."), ephemeral=True
-    )
-
-@bot.tree.command(name="welcomes-off", description="Stop sending new member welcomes.")
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.guild_only()
-async def welcomes_off(interaction: discord.Interaction):
-    welcome_config[str(interaction.guild_id)] = 0
-    save_welcomes()
-    await interaction.response.send_message(embed=notice("Welcomes are off."), ephemeral=True)
-
 ANTIRAID_FILE = DATA_DIR / "antiraid.json"
 PUNISH_ORDER = ["ban", "kick", "strip"]
 PUNISH_LABELS = {"ban": "Ban", "kick": "Kick", "strip": "Remove roles"}
@@ -3315,15 +3334,12 @@ def _merge(defaults: dict, data: dict) -> dict:
 
 def load_antiraid() -> None:
     global antiraid_config
-    try:
-        data = json.loads(ANTIRAID_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        data = {}
+    data = read_json(ANTIRAID_FILE)
     antiraid_config = {gid: _merge(DEFAULT_ANTIRAID, cfg) for gid, cfg in data.items()}
 
 
 def save_antiraid() -> None:
-    ANTIRAID_FILE.write_text(json.dumps(antiraid_config, indent=2), encoding="utf-8")
+    write_json_atomic(ANTIRAID_FILE, antiraid_config)
 
 
 def guild_cfg(gid: int) -> dict:
@@ -3564,7 +3580,7 @@ async def _antiraid_join(member: discord.Member) -> bool:
         await guild.edit(verification_level=discord.VerificationLevel.highest, reason="Anti-raid lockdown")
     except discord.HTTPException:
         pass
-    asyncio.create_task(_end_lockdown(guild, minutes * 60))
+    spawn(_end_lockdown(guild, minutes * 60))
     await _alarm(
         guild,
         f"{E('warn3', '⚠️')} Raid detected",
@@ -3945,14 +3961,11 @@ _invite_cache: dict[int, dict[str, int]] = {}
 
 def load_modlog() -> None:
     global modlog_config
-    try:
-        modlog_config = json.loads(MODLOG_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        modlog_config = {}
+    modlog_config = read_json(MODLOG_FILE)
 
 
 def save_modlog() -> None:
-    MODLOG_FILE.write_text(json.dumps(modlog_config, indent=2), encoding="utf-8")
+    write_json_atomic(MODLOG_FILE, modlog_config)
 
 
 def modlog_cfg(gid: int) -> dict:
@@ -4424,16 +4437,13 @@ invites_store: dict = {"channels": {}, "counts": {}, "joins": {}}
 
 def load_invites() -> None:
     global invites_store
-    try:
-        invites_store = json.loads(INVITES_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        invites_store = {}
+    invites_store = read_json(INVITES_FILE)
     for key in ("channels", "counts", "joins"):
         invites_store.setdefault(key, {})
 
 
 def save_invites() -> None:
-    INVITES_FILE.write_text(json.dumps(invites_store, indent=2), encoding="utf-8")
+    write_json_atomic(INVITES_FILE, invites_store)
 
 
 async def _record_invite(member: discord.Member, inviter) -> None:
@@ -4568,10 +4578,7 @@ anime_stats: dict[str, int] = {}
 
 def load_anime_stats() -> None:
     global anime_stats
-    try:
-        anime_stats = json.loads(ANIME_STATS_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        anime_stats = {}
+    anime_stats = read_json(ANIME_STATS_FILE)
 
 
 def _pair_note(gid: int, action: str, a, b) -> str | None:
@@ -4580,7 +4587,7 @@ def _pair_note(gid: int, action: str, a, b) -> str | None:
     low, high = sorted((a.id, b.id))
     key = f"{gid}:{action}:{low}:{high}"
     anime_stats[key] = anime_stats.get(key, 0) + 1
-    ANIME_STATS_FILE.write_text(json.dumps(anime_stats, indent=2), encoding="utf-8")
+    write_json_atomic(ANIME_STATS_FILE, anime_stats)
     return tr(gid, "anime.note", a=a.mention, b=b.mention, n=anime_stats[key], noun=tr(gid, f"anime.{action}.noun"))
 
 
@@ -4930,10 +4937,7 @@ WELCOME_DEFAULT_BODY = "«Thank you for joining Synex Protect. We're excited to 
 
 
 def _load_json_dict(path: Path) -> dict:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    return read_json(path)
 
 
 welcome_text_config: dict[str, str] = _load_json_dict(WELCOME_TEXTS_FILE)
@@ -4941,11 +4945,11 @@ goodbye_text_config: dict[str, str] = _load_json_dict(GOODBYE_TEXTS_FILE)
 
 
 def save_welcome_texts() -> None:
-    WELCOME_TEXTS_FILE.write_text(json.dumps(welcome_text_config, indent=2), encoding="utf-8")
+    write_json_atomic(WELCOME_TEXTS_FILE, welcome_text_config)
 
 
 def save_goodbye_texts() -> None:
-    GOODBYE_TEXTS_FILE.write_text(json.dumps(goodbye_text_config, indent=2), encoding="utf-8")
+    write_json_atomic(GOODBYE_TEXTS_FILE, goodbye_text_config)
 
 
 def render_text(text: str, **values) -> str:
@@ -5141,7 +5145,7 @@ def save_ticket_settings() -> None:
         "welcome_body": WELCOME_BODY,
         "welcome_color": WELCOME_COLOR,
     }
-    TICKET_SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    write_json_atomic(TICKET_SETTINGS_FILE, data)
 
 
 def set_ticket_setting(name: str, value) -> None:
@@ -5552,11 +5556,11 @@ for _gid, _text in goodbye_text_config.items():
 
 
 def save_welcome_style() -> None:
-    WELCOME_STYLE_FILE.write_text(json.dumps(welcome_style, indent=2), encoding="utf-8")
+    write_json_atomic(WELCOME_STYLE_FILE, welcome_style)
 
 
 def save_goodbye_style() -> None:
-    GOODBYE_STYLE_FILE.write_text(json.dumps(goodbye_style, indent=2), encoding="utf-8")
+    write_json_atomic(GOODBYE_STYLE_FILE, goodbye_style)
 
 
 def _style_store(kind: str) -> dict:
@@ -5897,313 +5901,6 @@ async def resync_prefix(ctx: commands.Context):
         embed=notice(f"{E('true', '✅')} {len(synced)} commands synced. If they still look old, close and reopen Discord."),
         mention_author=False,
     )
-
-
-
-
-# ---------------------------------------------------------------- marriages
-MARRIAGE_FILE = DATA_DIR / "marriages.json"
-MAX_MARRIAGES = 3
-marriages: dict[str, dict[str, list[str]]] = {}
-
-MARRIAGE_PROPOSE_LINES = [
-    "{a} proposed to {b}!",
-    "{a} got down on one knee for {b}!",
-    "{a} asked {b} to spend forever together!",
-]
-MARRIAGE_ACCEPT_LINES = [
-    "{a} and {b} will be together for the rest of their lives!",
-    "{a} and {b} are now married forever!",
-    "{a} and {b} said yes and sealed it with a kiss!",
-]
-
-
-def load_marriages() -> None:
-    global marriages
-    try:
-        raw = json.loads(MARRIAGE_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        raw = {}
-    marriages = {}
-    now = now_ts()
-    for gid, users in raw.items():
-        marriages[gid] = {}
-        for uid, value in users.items():
-            # Formatos antiguos: string o lista de ids, sin fecha. Se les pone la fecha de hoy.
-            if isinstance(value, str):
-                value = {value: now}
-            elif isinstance(value, list):
-                value = {pid: now for pid in value}
-            marriages[gid][uid] = value
-
-
-def save_marriages() -> None:
-    MARRIAGE_FILE.write_text(json.dumps(marriages, indent=2), encoding="utf-8")
-
-
-def partners_of(gid: int, uid: int) -> list[str]:
-    return list(marriages.get(str(gid), {}).get(str(uid), {}).keys())
-
-
-def add_marriage(gid: int, a: int, b: int) -> None:
-    pairs = marriages.setdefault(str(gid), {})
-    since = now_ts()
-    pairs.setdefault(str(a), {})[str(b)] = since
-    pairs.setdefault(str(b), {})[str(a)] = since
-    save_marriages()
-
-
-def remove_marriage(gid: int, a: int, b: int) -> None:
-    pairs = marriages.get(str(gid), {})
-    pairs.get(str(a), {}).pop(str(b), None)
-    pairs.get(str(b), {}).pop(str(a), None)
-    for uid in (str(a), str(b)):
-        if not pairs.get(uid):
-            pairs.pop(uid, None)
-    save_marriages()
-
-
-# Imagen de las propuestas. Pon aquí un link directo (.gif/.jpg/.png) para usar tu propia imagen.
-# Si queda en None, se usa una imagen aleatoria de anime de nekos.best.
-MARRY_IMAGE_URL: str | None = "https://media1.tenor.com/m/UWGgujVPy9IAAAAd/%E8%91%AC%E9%80%81%E7%9A%84%E8%8A%99%E8%8E%89%E8%93%AE-sousou-no-frieren.gif"
-# Imagen al casarse (escena de boda de anime). Pon aquí un link directo (.gif/.jpg/.png).
-# Si queda en None, se usa una imagen aleatoria de beso de nekos.best.
-MARRIAGE_ACCEPT_IMAGE_URL: str | None = "https://media1.tenor.com/m/r8JdBMAcRUYAAAAC/casados.gif"
-# Propuestas pendientes: (gid, proposer_id, target_id) -> vista
-PENDING_PROPOSALS: dict[tuple[int, int, int], "MarriageProposalView"] = {}
-
-
-def _kw(**kwargs) -> dict:
-    return {k: v for k, v in kwargs.items() if v is not None}
-
-
-def _marriage_container(text: str, gif: str | None, buttons: tuple = ()) -> discord.ui.Container:
-    children = [discord.ui.TextDisplay(text)]
-    if gif:
-        children += [discord.ui.Separator(), discord.ui.MediaGallery(discord.MediaGalleryItem(gif))]
-    if buttons:
-        children += [discord.ui.Separator(), discord.ui.ActionRow(*buttons)]
-    children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# {BOT_NAME} · v{BOT_VERSION}")]
-    return discord.ui.Container(*children, accent_colour=STEEL)
-
-
-def _marriage_result_view(text: str, gif: str | None) -> discord.ui.LayoutView:
-    view = discord.ui.LayoutView(timeout=None)
-    view.add_item(_marriage_container(text, gif))
-    return view
-
-
-def _limit_error(gid: int, proposer: discord.Member, target: discord.Member) -> str | None:
-    if len(partners_of(gid, proposer.id)) >= MAX_MARRIAGES:
-        return f"{proposer.display_name} already has {MAX_MARRIAGES} marriages."
-    if len(partners_of(gid, target.id)) >= MAX_MARRIAGES:
-        return f"{target.display_name} already has {MAX_MARRIAGES} marriages."
-    return None
-
-
-async def _complete_proposal(view: "MarriageProposalView", accepted: bool):
-    """Devuelve (error, vista_resultado). Si hay error, la propuesta sigue pendiente."""
-    if PENDING_PROPOSALS.get(view.key) is not view:
-        return "This proposal is no longer active.", None
-    if accepted:
-        err = _limit_error(view.gid, view.proposer, view.target)
-        if err:
-            return err, None
-    PENDING_PROPOSALS.pop(view.key, None)
-    view.stop()
-    if not accepted:
-        text = f"💔 {view.target.mention} declined {view.proposer.mention}'s proposal."
-        return None, _marriage_result_view(text, None)
-    add_marriage(view.gid, view.proposer.id, view.target.id)
-    gif = MARRIAGE_ACCEPT_IMAGE_URL or await _anime_gif("kiss")
-    text = random.choice(MARRIAGE_ACCEPT_LINES).format(a=view.proposer.mention, b=view.target.mention)
-    return None, _marriage_result_view(f"💞 {text}", gif)
-
-
-class MarriageProposalView(discord.ui.LayoutView):
-    def __init__(self, gid: int, proposer: discord.Member, target: discord.Member, text: str, gif: str | None):
-        super().__init__(timeout=300)
-        self.gid = gid
-        self.proposer = proposer
-        self.target = target
-        self.key = (gid, proposer.id, target.id)
-        accept = discord.ui.Button(label="Accept", emoji="💍", style=discord.ButtonStyle.success)
-        decline = discord.ui.Button(label="Decline", emoji="✖️", style=discord.ButtonStyle.danger)
-        accept.callback = self._accept_click
-        decline.callback = self._decline_click
-        self.add_item(_marriage_container(f"### 💍 {text}", gif, buttons=(accept, decline)))
-
-    async def _answer_click(self, interaction: discord.Interaction, accepted: bool):
-        if interaction.user.id != self.target.id:
-            return await interaction.response.send_message(
-                embed=error_notice(f"Only {self.target.display_name} can answer this proposal."), ephemeral=True)
-        err, result = await _complete_proposal(self, accepted)
-        if err:
-            return await interaction.response.send_message(embed=error_notice(err), ephemeral=True)
-        await interaction.response.edit_message(view=result)
-
-    async def _accept_click(self, interaction: discord.Interaction):
-        await self._answer_click(interaction, True)
-
-    async def _decline_click(self, interaction: discord.Interaction):
-        await self._answer_click(interaction, False)
-
-    async def on_timeout(self):
-        if PENDING_PROPOSALS.get(self.key) is self:
-            PENDING_PROPOSALS.pop(self.key, None)
-
-
-def _prefix_responder(ctx: commands.Context):
-    async def respond(embed=None, view=None, ephemeral=False, allowed_mentions=None):
-        return await ctx.reply(mention_author=False, **_kw(embed=embed, view=view, allowed_mentions=allowed_mentions))
-    return respond
-
-
-def _slash_responder(interaction: discord.Interaction):
-    async def respond(embed=None, view=None, ephemeral=False, allowed_mentions=None):
-        kwargs = _kw(embed=embed, view=view, ephemeral=ephemeral, allowed_mentions=allowed_mentions)
-        if not interaction.response.is_done():
-            return await interaction.response.send_message(**kwargs)
-        return await interaction.followup.send(**kwargs)
-    return respond
-
-
-async def _marry_flow(author: discord.Member, member: discord.Member, respond) -> None:
-    gid = author.guild.id
-    if member.bot or member.id == author.id:
-        return await respond(embed=error_notice("You can't marry that user."), ephemeral=True)
-    if str(member.id) in partners_of(gid, author.id):
-        return await respond(embed=error_notice(f"You are already married to {member.display_name}."), ephemeral=True)
-    err = _limit_error(gid, author, member)
-    if err:
-        return await respond(embed=error_notice(err), ephemeral=True)
-    if (gid, author.id, member.id) in PENDING_PROPOSALS:
-        return await respond(embed=error_notice(f"You already have a pending proposal to {member.display_name}."),
-                             ephemeral=True)
-    gif = MARRY_IMAGE_URL or await _anime_gif("handhold")
-    text = random.choice(MARRIAGE_PROPOSE_LINES).format(a=author.mention, b=member.mention)
-    view = MarriageProposalView(gid, author, member, text, gif)
-    PENDING_PROPOSALS[view.key] = view
-    await respond(view=view)
-
-
-async def _answer_flow(author: discord.Member, member: discord.Member | None, accepted: bool, respond) -> None:
-    gid = author.guild.id
-    if member is not None:
-        view = PENDING_PROPOSALS.get((gid, member.id, author.id))
-        if view is None:
-            return await respond(embed=error_notice(f"{member.display_name} has no pending proposal to you."),
-                                 ephemeral=True)
-    else:
-        views = [v for k, v in PENDING_PROPOSALS.items() if k[0] == gid and k[2] == author.id]
-        if not views:
-            return await respond(embed=error_notice("You have no pending proposals."), ephemeral=True)
-        if len(views) > 1:
-            return await respond(embed=error_notice("You have several proposals. Say who proposed with `member`."),
-                                 ephemeral=True)
-        view = views[0]
-    err, result = await _complete_proposal(view, accepted)
-    if err:
-        return await respond(embed=error_notice(err), ephemeral=True)
-    await respond(view=result)
-
-
-async def _divorce_flow(author: discord.Member, member: discord.Member, respond) -> None:
-    gid = author.guild.id
-    if str(member.id) not in partners_of(gid, author.id):
-        return await respond(embed=error_notice(f"You are not married to {member.display_name}."), ephemeral=True)
-    remove_marriage(gid, author.id, member.id)
-    await respond(embed=base_embed("💔 Divorce", f"{author.mention} and {member.mention} are no longer married.", STEEL),
-                  allowed_mentions=discord.AllowedMentions.none())
-
-
-async def _list_flow(guild: discord.Guild, respond, member: discord.Member | None = None) -> None:
-    seen, lines = set(), []
-    now = now_ts()
-    focus = str(member.id) if member is not None else None
-    for a, partners in marriages.get(str(guild.id), {}).items():
-        if focus is not None and a != focus:
-            continue
-        for b, since in partners.items():
-            key = frozenset((a, b))
-            if key in seen:
-                continue
-            seen.add(key)
-            lines.append(f"💍 <@{a}> & <@{b}> · married <t:{since}:R>")
-    if member is not None:
-        title = f"💍 Marriages · {member.display_name}"
-        empty = f"{member.display_name} has no marriages."
-    else:
-        title, empty = "💍 Marriages", "No marriages yet."
-    body = "\n".join(lines) or empty
-    await respond(embed=base_embed(title, body, STEEL), allowed_mentions=discord.AllowedMentions.none())
-
-
-# Prefijo: !marriage marry / divorcie / list
-@bot.group(name="marriage", invoke_without_command=True)
-async def marriage(ctx: commands.Context):
-    await ctx.reply(embed=notice("Use `!marriage marry @user`, `!marriage divorcie @user` or `!marriage list [@user]`."),
-                    mention_author=False)
-
-
-@marriage.command(name="marry")
-async def marriage_marry(ctx: commands.Context, member: discord.Member):
-    if ctx.guild is None:
-        return
-    await _marry_flow(ctx.author, member, _prefix_responder(ctx))
-
-
-@marriage.command(name="divorcie", aliases=["divorce"])
-async def marriage_divorce(ctx: commands.Context, member: discord.Member):
-    if ctx.guild is None:
-        return
-    await _divorce_flow(ctx.author, member, _prefix_responder(ctx))
-
-
-@marriage.command(name="list")
-async def marriage_list(ctx: commands.Context, member: discord.Member | None = None):
-    if ctx.guild is None:
-        return
-    await _list_flow(ctx.guild, _prefix_responder(ctx), member)
-
-
-# Slash: /marriage marry / divorcie / list / accept / decline
-marriage_slash = app_commands.Group(name="marriage", description="Marriage commands", guild_only=True)
-
-
-@marriage_slash.command(name="marry", description="Propose marriage to a member.")
-@app_commands.describe(member="The member you want to marry")
-async def marriage_marry_slash(interaction: discord.Interaction, member: discord.Member):
-    await _marry_flow(interaction.user, member, _slash_responder(interaction))
-
-
-@marriage_slash.command(name="divorcie", description="End a marriage with a member.")
-@app_commands.describe(member="The member you want to divorce")
-async def marriage_divorce_slash(interaction: discord.Interaction, member: discord.Member):
-    await _divorce_flow(interaction.user, member, _slash_responder(interaction))
-
-
-@marriage_slash.command(name="list", description="Show marriages in this server, or of one member.")
-@app_commands.describe(member="Only show this member's marriages (optional)")
-async def marriage_list_slash(interaction: discord.Interaction, member: discord.Member | None = None):
-    await _list_flow(interaction.guild, _slash_responder(interaction), member)
-
-
-@marriage_slash.command(name="accept", description="Accept a pending marriage proposal.")
-@app_commands.describe(member="Who proposed to you (optional if you only have one proposal)")
-async def marriage_accept_slash(interaction: discord.Interaction, member: discord.Member | None = None):
-    await _answer_flow(interaction.user, member, True, _slash_responder(interaction))
-
-
-@marriage_slash.command(name="decline", description="Decline a pending marriage proposal.")
-@app_commands.describe(member="Who proposed to you (optional if you only have one proposal)")
-async def marriage_decline_slash(interaction: discord.Interaction, member: discord.Member | None = None):
-    await _answer_flow(interaction.user, member, False, _slash_responder(interaction))
-
-
-bot.tree.add_command(marriage_slash)
-
-load_marriages()
 
 
 if __name__ == "__main__":
