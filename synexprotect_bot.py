@@ -5903,7 +5903,8 @@ async def resync_prefix(ctx: commands.Context):
 
 # ---------------------------------------------------------------- marriages
 MARRIAGE_FILE = DATA_DIR / "marriages.json"
-marriages: dict[str, dict[str, str]] = {}
+MAX_MARRIAGES = 3
+marriages: dict[str, dict[str, list[str]]] = {}
 
 MARRIAGE_PROPOSE_LINES = [
     "{a} proposed to {b}!",
@@ -5920,42 +5921,53 @@ MARRIAGE_ACCEPT_LINES = [
 def load_marriages() -> None:
     global marriages
     try:
-        marriages = json.loads(MARRIAGE_FILE.read_text(encoding="utf-8"))
+        raw = json.loads(MARRIAGE_FILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
-        marriages = {}
+        raw = {}
+    marriages = {}
+    now = now_ts()
+    for gid, users in raw.items():
+        marriages[gid] = {}
+        for uid, value in users.items():
+            # Formatos antiguos: string o lista de ids, sin fecha. Se les pone la fecha de hoy.
+            if isinstance(value, str):
+                value = {value: now}
+            elif isinstance(value, list):
+                value = {pid: now for pid in value}
+            marriages[gid][uid] = value
 
 
 def save_marriages() -> None:
     MARRIAGE_FILE.write_text(json.dumps(marriages, indent=2), encoding="utf-8")
 
 
-def partner_of(gid: int, uid: int) -> str | None:
-    return marriages.get(str(gid), {}).get(str(uid))
+def partners_of(gid: int, uid: int) -> list[str]:
+    return list(marriages.get(str(gid), {}).get(str(uid), {}).keys())
 
 
-def set_marriage(gid: int, a: int, b: int) -> None:
+def add_marriage(gid: int, a: int, b: int) -> None:
     pairs = marriages.setdefault(str(gid), {})
-    pairs[str(a)] = str(b)
-    pairs[str(b)] = str(a)
+    since = now_ts()
+    pairs.setdefault(str(a), {})[str(b)] = since
+    pairs.setdefault(str(b), {})[str(a)] = since
     save_marriages()
 
 
-def end_marriage(gid: int, uid: int) -> str | None:
+def remove_marriage(gid: int, a: int, b: int) -> None:
     pairs = marriages.get(str(gid), {})
-    partner = pairs.pop(str(uid), None)
-    if partner:
-        pairs.pop(partner, None)
+    pairs.get(str(a), {}).pop(str(b), None)
+    pairs.get(str(b), {}).pop(str(a), None)
+    for uid in (str(a), str(b)):
+        if not pairs.get(uid):
+            pairs.pop(uid, None)
     save_marriages()
-    return partner
 
 
-def _marriage_layout(text: str, gif: str | None, button: discord.ui.Button | None = None) -> discord.ui.LayoutView:
-    view = discord.ui.LayoutView(timeout=None if button is None else 300)
+def _marriage_layout(text: str, gif: str | None) -> discord.ui.LayoutView:
+    view = discord.ui.LayoutView(timeout=None)
     children = [discord.ui.TextDisplay(f"### {text}")]
     if gif:
         children += [discord.ui.Separator(), discord.ui.MediaGallery(discord.MediaGalleryItem(gif))]
-    if button is not None:
-        children += [discord.ui.Separator(), discord.ui.ActionRow(button)]
     children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# {BOT_NAME} · v{BOT_VERSION}")]
     view.add_item(discord.ui.Container(*children, accent_colour=0xEC4899))
     return view
@@ -5966,8 +5978,6 @@ class MarriageProposalView(discord.ui.LayoutView):
         super().__init__(timeout=300)
         self.proposer = proposer
         self.target = target
-        self.gif = gif
-        self.text = text
         self.accept_button = discord.ui.Button(label="Aceptar marriage", emoji="💍", style=discord.ButtonStyle.success)
         self.accept_button.callback = self._accept
         children = [discord.ui.TextDisplay(f"### 💍 {text}")]
@@ -5982,10 +5992,11 @@ class MarriageProposalView(discord.ui.LayoutView):
             return await interaction.response.send_message(
                 embed=error_notice(f"Only {self.target.display_name} can accept this proposal."), ephemeral=True)
         gid = interaction.guild_id or 0
-        if partner_of(gid, self.proposer.id) or partner_of(gid, self.target.id):
+        if len(partners_of(gid, self.proposer.id)) >= MAX_MARRIAGES or \
+                len(partners_of(gid, self.target.id)) >= MAX_MARRIAGES:
             return await interaction.response.send_message(
-                embed=error_notice("One of you is already married."), ephemeral=True)
-        set_marriage(gid, self.proposer.id, self.target.id)
+                embed=error_notice(f"One of you already has {MAX_MARRIAGES} marriages."), ephemeral=True)
+        add_marriage(gid, self.proposer.id, self.target.id)
         gif = await _anime_gif("kiss")
         text = random.choice(MARRIAGE_ACCEPT_LINES).format(a=self.proposer.mention, b=self.target.mention)
         await interaction.response.edit_message(view=_marriage_layout(f"💞 {text}", gif))
@@ -5994,7 +6005,7 @@ class MarriageProposalView(discord.ui.LayoutView):
 
 @bot.group(name="marriage", invoke_without_command=True)
 async def marriage(ctx: commands.Context):
-    await ctx.reply(embed=notice("Use `!marriage marry @user`, `!marriage divorcie` or `!marriage list`."),
+    await ctx.reply(embed=notice("Use `!marriage marry @user`, `!marriage divorcie @user` or `!marriage list`."),
                     mention_author=False)
 
 
@@ -6005,26 +6016,29 @@ async def marriage_marry(ctx: commands.Context, member: discord.Member):
     gid = ctx.guild.id
     if member.bot or member.id == ctx.author.id:
         return await ctx.reply(embed=error_notice("You can't marry that user."), mention_author=False)
-    if partner_of(gid, ctx.author.id):
-        return await ctx.reply(embed=error_notice("You are already married. Use `!marriage divorcie` first."),
+    if str(member.id) in partners_of(gid, ctx.author.id):
+        return await ctx.reply(embed=error_notice(f"You are already married to {member.display_name}."),
                                mention_author=False)
-    if partner_of(gid, member.id):
-        return await ctx.reply(embed=error_notice(f"{member.display_name} is already married."),
+    if len(partners_of(gid, ctx.author.id)) >= MAX_MARRIAGES:
+        return await ctx.reply(embed=error_notice(f"You already have {MAX_MARRIAGES} marriages. Divorce one first."),
+                               mention_author=False)
+    if len(partners_of(gid, member.id)) >= MAX_MARRIAGES:
+        return await ctx.reply(embed=error_notice(f"{member.display_name} already has {MAX_MARRIAGES} marriages."),
                                mention_author=False)
     gif = await _anime_gif("hug")
     text = random.choice(MARRIAGE_PROPOSE_LINES).format(a=ctx.author.mention, b=member.mention)
-    view = MarriageProposalView(ctx.author, member, gif, text)
-    await ctx.send(view=view)
+    await ctx.send(view=MarriageProposalView(ctx.author, member, gif, text))
 
 
 @marriage.command(name="divorcie", aliases=["divorce"])
-async def marriage_divorce(ctx: commands.Context):
+async def marriage_divorce(ctx: commands.Context, member: discord.Member):
     if ctx.guild is None:
         return
-    partner = end_marriage(ctx.guild.id, ctx.author.id)
-    if partner is None:
-        return await ctx.reply(embed=error_notice("You are not married."), mention_author=False)
-    await ctx.reply(embed=base_embed("💔 Divorce", f"{ctx.author.mention} and <@{partner}> are no longer married.", STEEL),
+    if str(member.id) not in partners_of(ctx.guild.id, ctx.author.id):
+        return await ctx.reply(embed=error_notice(f"You are not married to {member.display_name}."),
+                               mention_author=False)
+    remove_marriage(ctx.guild.id, ctx.author.id, member.id)
+    await ctx.reply(embed=base_embed("💔 Divorce", f"{ctx.author.mention} and {member.mention} are no longer married.", STEEL),
                     mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
 
@@ -6032,13 +6046,15 @@ async def marriage_divorce(ctx: commands.Context):
 async def marriage_list(ctx: commands.Context):
     if ctx.guild is None:
         return
-    pairs = marriages.get(str(ctx.guild.id), {})
     seen, lines = set(), []
-    for a, b in pairs.items():
-        if a in seen or b in seen:
-            continue
-        seen.update({a, b})
-        lines.append(f"💍 <@{a}> & <@{b}>")
+    now = now_ts()
+    for a, partners in marriages.get(str(ctx.guild.id), {}).items():
+        for b, since in partners.items():
+            key = frozenset((a, b))
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(f"💍 <@{a}> & <@{b}> · married for **{fmt_seconds(max(0, now - since))}**")
     body = "\n".join(lines) or "No marriages yet."
     await ctx.reply(embed=base_embed("💍 Marriages", body, STEEL), mention_author=False,
                     allowed_mentions=discord.AllowedMentions.none())
