@@ -1131,9 +1131,20 @@ async def timer_prefix(ctx: commands.Context, *, args: str = ""):
 import random
 
 LANGUAGE_ALIASES = {
-    "esp": "es", "spa": "es", "spanish": "es", "español": "es", "espanol": "es",
+    "esp": "es", "spa": "es", "spanish": "es", "español": "es", "espanol": "es", "castellano": "es",
     "eng": "en", "english": "en", "ingles": "en", "inglés": "en",
     "por": "pt", "port": "pt", "portuguese": "pt", "portugues": "pt", "português": "pt",
+    "fra": "fr", "french": "fr", "frances": "fr", "francés": "fr",
+    "ita": "it", "italian": "it", "italiano": "it",
+    "deu": "de", "ger": "de", "german": "de", "aleman": "de", "alemán": "de",
+    "jap": "ja", "japanese": "ja", "japones": "ja", "japonés": "ja",
+    "chi": "zh-CN", "chinese": "zh-CN", "chino": "zh-CN",
+    "rus": "ru", "russian": "ru", "ruso": "ru",
+}
+LANGUAGE_NAMES = {
+    "es": "Español", "en": "English", "pt": "Português", "fr": "Français", "it": "Italiano",
+    "de": "Deutsch", "ja": "日本語", "ko": "한국어", "zh-CN": "中文", "ru": "Русский",
+    "ar": "العربية", "hi": "हिन्दी", "tr": "Türkçe", "nl": "Nederlands", "pl": "Polski",
 }
 
 
@@ -1142,76 +1153,120 @@ def _lang_code(value: str) -> str:
     return LANGUAGE_ALIASES.get(cleaned, cleaned)
 
 
+def _source_text(message: discord.Message) -> str:
+    parts = []
+    if message.content:
+        parts.append(message.content)
+    for embed in message.embeds:
+        if embed.title:
+            parts.append(embed.title)
+        if embed.description:
+            parts.append(embed.description)
+        for field in embed.fields:
+            parts.append(f"{field.name}\n{field.value}")
+    return "\n\n".join(p for p in parts if p and p.strip()).strip()
+
+
+def _split_text(text: str, limit: int = 4500) -> list[str]:
+    chunks, current = [], ""
+    for line in text.splitlines(keepends=True):
+        while len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if len(current) + len(line) > limit:
+            chunks.append(current)
+            current = ""
+        current += line
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 async def _translate_text(text: str, language: str) -> str | None:
+    def run() -> str:
+        translator = GoogleTranslator(source="auto", target=language)
+        return "".join((translator.translate(chunk) or "") for chunk in _split_text(text))
     try:
-        return await asyncio.to_thread(GoogleTranslator(source="auto", target=language).translate, text)
-    except Exception:
+        result = await asyncio.to_thread(run)
+    except Exception as exc:
+        print(f"[translate] could not translate to {language!r}: {exc}")
         return None
+    return result if result and result.strip() else None
 
 
-async def _translation_payload(source_text: str, source_embed: discord.Embed | None, language: str) -> dict | None:
-    if source_embed is not None:
-        title = source_embed.title or ""
-        description = source_embed.description or ""
-        translated_title = await _translate_text(title, language) if title else ""
-        translated_description = await _translate_text(description, language) if description else ""
-        if translated_title is None or translated_description is None:
-            return None
-        embed = discord.Embed(title=translated_title or None, description=translated_description or None,
-                              color=source_embed.color or STEEL)
-        embed.set_footer(text=f"Translated to {language}")
-        return {"embed": embed}
-    translated = await _translate_text(source_text, language)
-    if translated is None:
-        return None
-    return {"content": translated}
+def _translation_embed(original: str, translated: str, language: str) -> discord.Embed:
+    embed = base_embed(f"{E(['transfer', 'community'], '🌐')} Translation", translated[:4000], STEEL)
+    name = LANGUAGE_NAMES.get(language, language)
+    short_original = original if len(original) <= 300 else original[:300] + "…"
+    embed.add_field(name="Language", value=f"**{name}** · `{language}`", inline=True)
+    embed.add_field(name="Original", value=short_original, inline=False)
+    return embed
 
 
 @bot.command(name="translate")
 async def translate_prefix(ctx: commands.Context, language: str, *, text: str | None = None):
+    gid = ctx.guild.id if ctx.guild else 0
     source = None
-    if ctx.message.reference is not None and ctx.message.reference.message_id is not None:
-        try:
-            source = await ctx.channel.fetch_message(ctx.message.reference.message_id)
-        except discord.HTTPException:
-            source = None
-    if source is None and not text:
-        return await ctx.reply(embed=error_notice(tr(ctx.guild.id if ctx.guild else 0, "translate.need_text")),
-                               mention_author=False)
-    source_text = source.content if source is not None else text
-    source_embed = source.embeds[0] if source is not None and source.embeds else None
-    payload = await _translation_payload(source_text or "", source_embed, _lang_code(language))
-    if payload is None:
-        return await ctx.reply(embed=error_notice(tr(ctx.guild.id if ctx.guild else 0, "translate.failed")),
-                               mention_author=False)
-    await ctx.reply(**payload, mention_author=False)
+    reference = ctx.message.reference
+    if reference is not None and reference.message_id is not None:
+        source = reference.resolved if isinstance(reference.resolved, discord.Message) else None
+        if source is None:
+            try:
+                source = await ctx.channel.fetch_message(reference.message_id)
+            except discord.HTTPException:
+                source = None
+        if source is None:
+            return await ctx.reply(embed=error_notice(tr(gid, "translate.not_found")), mention_author=False)
+    source_text = text.strip() if text and text.strip() else (_source_text(source) if source else "")
+    if not source_text:
+        return await ctx.reply(embed=error_notice(tr(gid, "translate.need_text")), mention_author=False)
+    code = _lang_code(language)
+    translated = await _translate_text(source_text, code)
+    if translated is None:
+        return await ctx.reply(embed=error_notice(tr(gid, "translate.failed")), mention_author=False)
+    await ctx.reply(embed=_translation_embed(source_text, translated, code), mention_author=False)
 
 
 @bot.tree.command(name="translate", description="Translate a text, or a message by its ID, into another language.")
-@app_commands.describe(language="eng, esp, por, or a code like fr", text="The text to translate",
+@app_commands.describe(language="Language: eng, esp, por, or a code like fr", text="The text to translate",
                        message_id="ID of a message in this channel to translate")
-async def translate(interaction: discord.Interaction, language: str, text: str | None = None, message_id: str | None = None):
+async def translate(interaction: discord.Interaction, language: str, text: str | None = None,
+                    message_id: str | None = None):
+    gid = interaction.guild_id or 0
     source = None
     if message_id:
         try:
             source = await interaction.channel.fetch_message(int(message_id.strip()))
         except (ValueError, discord.HTTPException):
             return await interaction.response.send_message(
-                embed=error_notice(tr(interaction.guild_id, "translate.not_found")), ephemeral=True
-            )
-    if source is None and not text:
+                embed=error_notice(tr(gid, "translate.not_found")), ephemeral=True)
+    if not text and source is None:
         return await interaction.response.send_message(
-            embed=error_notice(tr(interaction.guild_id, "translate.need_input")), ephemeral=True
-        )
-    await interaction.response.defer(ephemeral=source is None)
-    source_text = source.content if source is not None else text
-    source_embed = source.embeds[0] if source is not None and source.embeds else None
-    payload = await _translation_payload(source_text or "", source_embed, _lang_code(language))
-    if payload is None:
-        return await interaction.followup.send(
-            embed=error_notice(tr(interaction.guild_id, "translate.failed")), ephemeral=True
-        )
-    await interaction.followup.send(**payload, ephemeral=source is None)
+            embed=error_notice(tr(gid, "translate.need_input")), ephemeral=True)
+    source_text = text.strip() if text and text.strip() else _source_text(source)
+    if not source_text:
+        return await interaction.response.send_message(
+            embed=error_notice(tr(gid, "translate.need_text")), ephemeral=True)
+    private = source is None
+    await interaction.response.defer(ephemeral=private)
+    code = _lang_code(language)
+    translated = await _translate_text(source_text, code)
+    if translated is None:
+        return await interaction.followup.send(embed=error_notice(tr(gid, "translate.failed")), ephemeral=True)
+    await interaction.followup.send(embed=_translation_embed(source_text, translated, code), ephemeral=private)
+
+
+@translate.autocomplete("language")
+async def translate_language_autocomplete(interaction: discord.Interaction, current: str):
+    text = current.lower().strip()
+    return [
+        app_commands.Choice(name=f"{name}  ·  {code}", value=code)
+        for code, name in LANGUAGE_NAMES.items()
+        if not text or text in name.lower() or text in code.lower()
+    ][:25]
 
 GIVEAWAY_LOCK = asyncio.Lock()
 JOIN_BUTTON_ID = "giveaway:join"
@@ -2883,6 +2938,7 @@ STRINGS = {
         "afk.jump": "Jump to message",
         "afk.is_afk": "{name} is AFK",
         "afk.since": "Since",
+        "afk.ago": "AFK for {time}",
         "bot.hi": "Hi {name}!",
         "bot.intro": "I'm the protection bot for **{server}**.\nMy prefix is `!`. Use `/help` or `!help` to see my commands.",
         "invites.new": "New invite",
@@ -2944,6 +3000,7 @@ STRINGS = {
         "afk.jump": "Ir al mensaje",
         "afk.is_afk": "{name} está AFK",
         "afk.since": "Desde",
+        "afk.ago": "AFK desde hace {time}",
         "bot.hi": "¡Hola {name}!",
         "bot.intro": "Soy el bot de protección de **{server}**.\nMi prefijo es `!`. Usa `/help` o `!help` para ver mis comandos.",
         "invites.new": "Nueva invitación",
@@ -4641,7 +4698,8 @@ async def _afk_on_message(message: discord.Message) -> None:
     if message.guild is None or message.author.bot:
         return
     gid = message.guild.id
-    record = AFK_STATE.pop((gid, message.author.id), None)
+    is_afk_command = message.content.strip().lower().startswith(("!afk", "/afk"))
+    record = None if is_afk_command else AFK_STATE.pop((gid, message.author.id), None)
     if record is not None:
         await _clear_afk_nick(message.author, record)
         away = fmt_seconds(now_ts() - record["since"])
@@ -4664,7 +4722,7 @@ async def _afk_on_message(message: discord.Message) -> None:
         try:
             await message.channel.send(
                 embed=base_embed(f"😴 {tr(gid, 'afk.is_afk', name=target.display_name)}",
-                                 f"{mentioned['reason']}\n-# {tr(gid, 'afk.since')} <t:{mentioned['since']}:R>", STEEL),
+                                 f"{mentioned['reason']}\n-# {tr(gid, 'afk.ago', time=fmt_seconds(max(0, now_ts() - mentioned['since'])))}", STEEL),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException:
@@ -5773,6 +5831,23 @@ async def welcomes_settings(interaction: discord.Interaction):
 async def despedidas_settings(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=goodbyes_embed(interaction.guild), view=GoodbyesPanel(interaction.user.id), ephemeral=True)
+
+
+@bot.command(name="resync")
+@commands.is_owner()
+async def resync_prefix(ctx: commands.Context):
+    if ctx.guild is None:
+        return
+    bot.tree.clear_commands(guild=ctx.guild)
+    await bot.tree.sync(guild=ctx.guild)
+    bot.tree.copy_global_to(guild=ctx.guild)
+    synced = await bot.tree.sync(guild=ctx.guild)
+    await ctx.reply(
+        embed=notice(f"{E('true', '✅')} {len(synced)} commands synced. If they still look old, close and reopen Discord."),
+        mention_author=False,
+    )
+
+
 
 
 if __name__ == "__main__":
