@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.21.0"
+BOT_VERSION = "1.22.0"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -763,6 +763,12 @@ PUBLIC_COMMANDS = [
     ("avatar", "Show a member's avatar at full size, with a download button.", "/avatar [member]  ·  !avatar [member]"),
     ("translate", "Translate any text into another language.", "/translate language text"),
     ("timer", "Start a timer everyone in the channel can see. You get a DM when it ends.", "/timer time reminder  ·  !timer time reminder"),
+    ("hug", "Hug someone with an anime GIF. The person can hug back with one click.", "!hug [member]"),
+    ("kiss", "Kiss someone with an anime GIF. The person can kiss back with one click.", "!kiss [member]"),
+    ("punch", "Punch someone with an anime GIF. The person can punch back with one click.", "!punch [member]"),
+    ("cry", "Cry with an anime GIF, alone or because of someone.", "!cry [member]"),
+    ("sleep", "Go to sleep with an anime GIF, alone or next to someone.", "!sleep [member]"),
+    ("banana", "Give someone a banana with an anime GIF.", "!banana [member]"),
     ("help", "Show this command list.", "/help  ·  !help"),
 ]
 
@@ -806,11 +812,13 @@ HELP_CATEGORIES = {
     "public": [
         ("Utility", ["ping", "serverinfo", "userinfo", "botinfo", "avatar"]),
         ("Tools", ["translate", "timer", "help"]),
+        ("Anime reactions", ["hug", "kiss", "punch", "cry", "sleep", "banana"]),
     ],
     "admin": [
         ("Giveaways", ["giveaway create", "giveaway end", "giveaway reroll"]),
-        ("Tickets", ["tickets-setup", "categorytickets"]),
-        ("Welcome & roles", ["welcomes-setup", "welcomes-on", "welcomes-off", "autorol", "autorol-off", "addemojirole", "removeemojirole"]),
+        ("Tickets", ["tickets-setup", "categorytickets", "tickets-log"]),
+        ("Welcome & roles", ["welcomes-setup", "welcomes-on", "welcomes-off", "welcomes-button", "welcomes-button-remove", "welcomes-buttons-reset", "autorol", "autorol-off", "addemojirole", "removeemojirole"]),
+        ("Invites & goodbyes", ["invites-setup", "invites-off", "despedidas-setup", "despedidas-off"]),
         ("Moderation", ["ban", "unban", "kick", "mute", "unmute"]),
         ("Logs", ["modlog-setup", "modlog-events", "modlog-off"]),
         ("Protection", ["antiraid"]),
@@ -849,7 +857,7 @@ class CommandSelect(discord.ui.Select):
             return await interaction.response.send_message("This menu belongs to someone else.", ephemeral=True)
 
         entry = self.entries[self.values[0]]
-        embed = base_embed(f"/{entry[0]}", entry[1], INK if self.admin else SLATE)
+        embed = base_embed(_command_label(entry[0]), entry[1], INK if self.admin else SLATE)
         embed.add_field(name="Usage", value=f"`{entry[2]}`", inline=False)
         if self.admin:
             embed.add_field(name="Required permission", value=entry[3], inline=True)
@@ -859,6 +867,10 @@ class CommandView(discord.ui.View):
     def __init__(self, owner_id: int, entries: list[tuple], admin: bool = False):
         super().__init__(timeout=180)
         self.add_item(CommandSelect(owner_id, entries, admin))
+
+def _command_label(name: str) -> str:
+    return f"!{name}" if name in ANIME_ACTIONS else f"/{name}"
+
 
 def _help_fields(entries: list[tuple], groups: list[tuple[str, list[str]]], admin: bool) -> list[tuple[str, str]]:
     by_name = {e[0]: e for e in entries}
@@ -871,9 +883,19 @@ def _help_fields(entries: list[tuple], groups: list[tuple[str, list[str]]], admi
                 continue
             prefix = f" · `!{PREFIX_MAP[name]}`" if name in PREFIX_MAP else ""
             perm = f" · *{entry[3]}*" if admin else ""
-            lines.append(f"**`/{name}`**{prefix}{perm}\n{entry[1]}")
-        if lines:
-            fields.append((title, "\n\n".join(lines)))
+            lines.append(f"**`{_command_label(name)}`**{prefix}{perm}\n{entry[1]}")
+        chunks, current = [], ""
+        for line in lines:
+            candidate = f"{current}\n\n{line}" if current else line
+            if len(candidate) > 1000 and current:
+                chunks.append(current)
+                current = line
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+        for index, chunk in enumerate(chunks):
+            fields.append((title if index == 0 else f"{title} (cont.)", chunk))
     return fields
 
 
