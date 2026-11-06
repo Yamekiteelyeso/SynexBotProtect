@@ -873,7 +873,8 @@ class CommandSelect(discord.ui.Select):
 class CommandView(discord.ui.View):
     def __init__(self, owner_id: int, entries: list[tuple], admin: bool = False):
         super().__init__(timeout=180)
-        self.add_item(CommandSelect(owner_id, entries, admin))
+        for start in range(0, len(entries), 25):
+            self.add_item(CommandSelect(owner_id, entries[start:start + 25], admin))
 
 def _command_label(name: str) -> str:
     return f"!{name}" if name in ANIME_ACTIONS else f"/{name}"
@@ -934,8 +935,14 @@ def build_helpadmin_embed() -> discord.Embed:
     embed = base_embed(f"{E('transfer', '🔁')} Administrator commands", intro, INK)
     if bot.user:
         embed.set_thumbnail(url=bot.user.display_avatar.url)
-    for name, value in _help_fields(ADMIN_COMMANDS, HELP_CATEGORIES["admin"], admin=True):
-        embed.add_field(name=name, value=value, inline=False)
+    by_name = {e[0]: e for e in ADMIN_COMMANDS}
+    for title, names in HELP_CATEGORIES["admin"]:
+        present = [n for n in names if n in by_name]
+        if not present:
+            continue
+        perms = " · ".join(sorted({by_name[n][3] for n in present}))
+        value = " · ".join(f"`{_command_label(n)}`" for n in present)
+        embed.add_field(name=f"{title} · {perms}", value=value[:1024], inline=False)
     embed.set_footer(text=f"{BOT_NAME} · Admin panel · v{BOT_VERSION}")
     return embed
 
@@ -2901,8 +2908,8 @@ STRINGS = {
         "anime.sleep.solo": "{a} went to sleep",
         "anime.banana.text": "{a} gives {b} a banana",
         "anime.banana.solo": "{a} enjoys their banana",
-        "anime.banana.measure": "{a} measures their banana: **{cm} cm** 🍌",
-        "anime.banana.measure_for": "{a} measures {b}'s banana: **{cm} cm** 🍌",
+        "anime.banana.measure": "{a} banana: {cm}cm",
+        "anime.banana.measure_for": "{b} banana: {cm}cm",
         "anime.note": "{a} and {b} have **{n}** {noun}",
         "anime.return": "Return",
         "anime.footer": "{bot} · Anime reactions",
@@ -2962,8 +2969,8 @@ STRINGS = {
         "anime.sleep.solo": "{a} se fue a dormir",
         "anime.banana.text": "{a} le regala una banana a {b}",
         "anime.banana.solo": "{a} disfruta su banana",
-        "anime.banana.measure": "{a} mide su banana: **{cm} cm** 🍌",
-        "anime.banana.measure_for": "{a} mide la banana de {b}: **{cm} cm** 🍌",
+        "anime.banana.measure": "{a} banana: {cm}cm",
+        "anime.banana.measure_for": "{b} banana: {cm}cm",
         "anime.note": "{a} y {b} tienen **{n}** {noun}",
         "anime.return": "Devolver",
         "anime.footer": "{bot} · Reacciones anime",
@@ -3073,6 +3080,20 @@ async def servername_reset(interaction: discord.Interaction):
     server_names.pop(str(interaction.guild_id), None)
     save_server_names()
     await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Server name reset."), ephemeral=True)
+
+
+@bot.tree.command(name="servername-settings", description="Show the name the bot uses for this server.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def servername_settings(interaction: discord.Interaction):
+    custom = str(interaction.guild_id) in server_names
+    rows = [
+        ("Name in messages", server_name(interaction.guild)),
+        ("Real Discord name", interaction.guild.name),
+        ("Custom name", "Yes" if custom else "No, using the real name"),
+    ]
+    await interaction.response.send_message(embed=_settings_embed("Server name settings", rows), ephemeral=True)
 
 
 def _settings_embed(title: str, rows: list[tuple[str, str]]) -> discord.Embed:
@@ -4310,6 +4331,21 @@ async def modlog_events(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=notice("Pick the events to log. Unselected events are turned off."), view=view, ephemeral=True
     )
+
+
+@bot.tree.command(name="modlog-settings", description="Show the current log channel and logged events.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def modlog_settings(interaction: discord.Interaction):
+    cfg = modlog_cfg(interaction.guild_id)
+    active = [e for e in MODLOG_EVENTS if cfg["events"].get(e, True)]
+    rows = [
+        ("Channel", _channel_text(interaction.guild, cfg["channel"])),
+        ("Events on", f"{len(active)}/{len(MODLOG_EVENTS)}"),
+        ("Events", ", ".join(f"`{e}`" for e in active) or "None"),
+    ]
+    await interaction.response.send_message(embed=_settings_embed("Log settings", rows), ephemeral=True)
 
 
 async def _log_ban(guild: discord.Guild, user: discord.User) -> None:
