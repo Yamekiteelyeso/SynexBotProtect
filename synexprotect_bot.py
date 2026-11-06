@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.19.0"
+BOT_VERSION = "1.20.0"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -2463,7 +2463,7 @@ def save_welcomes() -> None:
 WELCOME_LINKS = [
     ("See Rules", ["GE_rules"], "https://discord.com/channels/1557386505226420385/1557387851619106897"),
     ("Chat", ["community~1", "community_1", "community1", "community"], "https://discord.com/channels/1557386505226420385/1557389744957292555"),
-    ("tickets", ["NofiTicket"], "https://discord.com/channels/1557386505226420385/1557389744957292555"),
+    ("Tickets", ["NofiTicket"], "https://discord.com/channels/1557386505226420385/1557389744957292555"),
 ]
 
 def build_welcome_layout(member: discord.Member) -> discord.ui.LayoutView:
@@ -2582,7 +2582,10 @@ def save_autoroles() -> None:
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    await _log_invite_join(member)
+    if member.bot:
+        await _log_bot_join(member)
+    else:
+        await _log_invite_join(member)
     if await _antiraid_join(member):
         return
     role_id = autoroles.get(str(member.guild.id))
@@ -3861,7 +3864,7 @@ async def _record_invite(member: discord.Member, inviter) -> None:
     if channel is None:
         return
     who = inviter.mention if inviter is not None else "**Unknown**"
-    message = f"{who} invitó a {member.mention} y tiene **{total}** invites"
+    message = f"{who} invited {member.mention} and has **{total}** invites"
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(
         discord.ui.TextDisplay(f"### {E(['GE_member', 'community'], '🔗')} New invite"),
@@ -3875,6 +3878,37 @@ async def _record_invite(member: discord.Member, inviter) -> None:
         await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException as exc:
         print(f"[invites] could not post: {exc}")
+
+
+DANGEROUS_PERMS = (
+    "administrator", "manage_guild", "manage_roles", "manage_channels",
+    "ban_members", "kick_members", "manage_webhooks", "mention_everyone",
+)
+
+
+async def _log_bot_join(member: discord.Member) -> None:
+    guild = member.guild
+    entry = await _audit_peek(guild, discord.AuditLogAction.bot_add, member.id, max_age=60)
+    adder = entry.user if entry is not None else None
+    perms = member.guild_permissions
+    flagged = [name.replace("_", " ").title() for name in DANGEROUS_PERMS if getattr(perms, name)]
+    fields = [
+        ("Bot", _who(member)),
+        ("Added by", _who(adder) if adder is not None else "Unknown"),
+        ("Dangerous permissions", ", ".join(flagged) if flagged else "None"),
+    ]
+    if perms.administrator:
+        fields.append(("Warning", "This bot has Administrator. Keep it only if you trust it."))
+    color = 0xEF4444 if perms.administrator else STEEL
+    channel_id = invites_store["channels"].get(str(guild.id)) or modlog_cfg(guild.id)["channel"]
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if channel is None:
+        return
+    try:
+        await channel.send(view=_action_card("Bot added", color, member, fields),
+                           allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as exc:
+        print(f"[bots] could not post: {exc}")
 
 
 async def _on_invite_member_leave(member: discord.Member) -> None:
@@ -3945,19 +3979,44 @@ async def _log_invite_join(member: discord.Member) -> None:
 import aiohttp
 
 ANIME_ACTIONS = {
-    "hug": {"category": "hug", "emoji": "🤗", "color": 0xEC4899, "text": "{a} abraza a {b}",
-            "solo": "{a} se da un abrazo", "back": "{a} devuelve el abrazo a {b}"},
-    "kiss": {"category": "kiss", "emoji": "💋", "color": 0xEC4899, "text": "{a} le da un beso a {b}",
-             "solo": "{a} se manda un beso", "back": "{a} le devuelve el beso a {b}"},
-    "punch": {"category": "punch", "emoji": "👊", "color": 0xEF4444, "text": "{a} le pega a {b}",
-              "solo": "{a} se pega solo", "back": "{a} le devuelve el golpe a {b}"},
-    "cry": {"category": "cry", "emoji": "😭", "color": 0x3B82F6, "text": "{a} está llorando por culpa de {b}",
-            "solo": "{a} está llorando", "back": None},
-    "sleep": {"category": "sleep", "emoji": "😴", "color": 0x1E3A8A, "text": "{a} duerme junto a {b}",
-              "solo": "{a} se fue a dormir", "back": None},
-    "banana": {"category": "happy", "emoji": "🍌", "color": 0xFACC15, "text": "{a} le regala una banana a {b}",
-               "solo": "{a} disfruta su banana", "back": None},
+    "hug": {"category": "hug", "emoji": "🤗", "color": STEEL, "text": "{a} hugs {b}",
+            "solo": "{a} hugs themselves", "back": "{a} hugs {b} back", "noun": "hugs"},
+    "kiss": {"category": "kiss", "emoji": "💋", "color": STEEL, "text": "{a} kisses {b}",
+             "solo": "{a} blows a kiss", "back": "{a} kisses {b} back", "noun": "kisses"},
+    "punch": {"category": "punch", "emoji": "👊", "color": STEEL, "text": "{a} punches {b}",
+              "solo": "{a} punches themselves", "back": "{a} punches {b} back", "noun": "punches"},
+    "cry": {"category": "cry", "emoji": "😭", "color": STEEL, "text": "{a} is crying because of {b}",
+            "solo": "{a} is crying", "back": None},
+    "sleep": {"category": "sleep", "emoji": "😴", "color": STEEL, "text": "{a} is sleeping next to {b}",
+              "solo": "{a} went to sleep", "back": None},
+    "banana": {"category": "happy", "emoji": "🍌", "color": STEEL, "text": "{a} gives {b} a banana",
+               "solo": "{a} enjoys their banana", "back": None},
 }
+
+ANIME_STATS_FILE = DATA_DIR / "anime_stats.json"
+anime_stats: dict[str, int] = {}
+
+
+def load_anime_stats() -> None:
+    global anime_stats
+    try:
+        anime_stats = json.loads(ANIME_STATS_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        anime_stats = {}
+
+
+def _pair_note(gid: int, action: str, a, b) -> str | None:
+    noun = ANIME_ACTIONS[action].get("noun")
+    if not noun:
+        return None
+    low, high = sorted((a.id, b.id))
+    key = f"{gid}:{action}:{low}:{high}"
+    anime_stats[key] = anime_stats.get(key, 0) + 1
+    ANIME_STATS_FILE.write_text(json.dumps(anime_stats, indent=2), encoding="utf-8")
+    return f"{a.mention} and {b.mention} have **{anime_stats[key]}** {noun}"
+
+
+load_anime_stats()
 
 
 async def _anime_gif(category: str) -> str | None:
@@ -3975,18 +4034,22 @@ async def _anime_gif(category: str) -> str | None:
 
 
 class AnimeView(discord.ui.LayoutView):
-    def __init__(self, text, gif, color, *, author=None, target=None, back_text=None, category=None):
+    def __init__(self, text, gif, color, *, author=None, target=None, back_text=None, category=None,
+                 action=None, note=None):
         super().__init__(timeout=300)
         self.author = author
         self.target = target
         self.back_text = back_text
         self.category = category
+        self.action = action
         self.color = color
         children = [discord.ui.TextDisplay(f"### {text}")]
+        if note:
+            children.append(discord.ui.TextDisplay(note))
         if gif:
             children += [discord.ui.Separator(), discord.ui.MediaGallery(discord.MediaGalleryItem(gif))]
         if target is not None and back_text:
-            button = discord.ui.Button(label="Devolver", emoji="↩️", style=discord.ButtonStyle.secondary)
+            button = discord.ui.Button(label="Return", emoji="↩️", style=discord.ButtonStyle.secondary)
             button.callback = self._give_back
             children += [discord.ui.Separator(), discord.ui.ActionRow(button)]
         children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# {BOT_NAME} · Anime reactions")]
@@ -4000,7 +4063,9 @@ class AnimeView(discord.ui.LayoutView):
         await interaction.response.defer()
         gif = await _anime_gif(self.category)
         text = self.back_text.format(a=self.target.mention, b=self.author.mention)
-        await interaction.followup.send(view=AnimeView(text, gif, self.color))
+        note = _pair_note(interaction.guild_id, self.action, self.target, self.author)
+        await interaction.followup.send(view=AnimeView(f"{ANIME_ACTIONS[self.action]['emoji']} {text}", gif, self.color,
+                                                       action=self.action, note=note))
 
 
 async def _send_anime(ctx: commands.Context, name: str, member: discord.Member | None) -> None:
@@ -4010,9 +4075,10 @@ async def _send_anime(ctx: commands.Context, name: str, member: discord.Member |
         text = cfg["solo"].format(a=ctx.author.mention)
     else:
         text = cfg["text"].format(a=ctx.author.mention, b=target.mention)
+    note = _pair_note(ctx.guild.id, name, ctx.author, target) if target is not None and ctx.guild else None
     gif = await _anime_gif(cfg["category"])
     view = AnimeView(f"{cfg['emoji']} {text}", gif, cfg["color"], author=ctx.author, target=target,
-                     back_text=cfg["back"], category=cfg["category"])
+                     back_text=cfg["back"], category=cfg["category"], action=name, note=note)
     await ctx.send(view=view)
 
 
