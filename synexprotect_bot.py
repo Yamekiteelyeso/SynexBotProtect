@@ -1185,16 +1185,45 @@ def _split_text(text: str, limit: int = 4500) -> list[str]:
     return chunks
 
 
+TRANSLATE_ENDPOINT = "https://translate.googleapis.com/translate_a/single"
+
+
+async def _google_translate_chunk(chunk: str, language: str) -> str:
+    import aiohttp
+    params = {"client": "gtx", "sl": "auto", "tl": language, "dt": "t"}
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(TRANSLATE_ENDPOINT, params=params, data={"q": chunk}) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"HTTP {resp.status}")
+            data = await resp.json(content_type=None)
+    return "".join(part[0] for part in (data[0] or []) if part and part[0])
+
+
+def _fallback_translate_chunk(chunk: str, language: str) -> str:
+    return GoogleTranslator(source="auto", target=language).translate(chunk) or ""
+
+
 async def _translate_text(text: str, language: str) -> str | None:
-    def run() -> str:
-        translator = GoogleTranslator(source="auto", target=language)
-        return "".join((translator.translate(chunk) or "") for chunk in _split_text(text))
-    try:
-        result = await asyncio.to_thread(run)
-    except Exception as exc:
-        print(f"[translate] could not translate to {language!r}: {exc}")
-        return None
-    return result if result and result.strip() else None
+    pieces = []
+    for chunk in _split_text(text, limit=1500):
+        result = None
+        for _ in range(2):
+            try:
+                result = await _google_translate_chunk(chunk, language)
+                break
+            except Exception as exc:
+                print(f"[translate] direct request failed: {exc}")
+                await asyncio.sleep(0.5)
+        if result is None:
+            try:
+                result = await asyncio.to_thread(_fallback_translate_chunk, chunk, language)
+            except Exception as exc:
+                print(f"[translate] could not translate to {language!r}: {exc}")
+                return None
+        pieces.append(result)
+    final = "".join(pieces).strip()
+    return final or None
 
 
 def _translation_embed(original: str, translated: str, language: str) -> discord.Embed:
@@ -4599,6 +4628,7 @@ class AnimeView(discord.ui.LayoutView):
 
 
 BANANA_IMAGE = Path(__file__).parent / "assets" / "banana.png"
+BANANA_IMAGE_URL = "https://static.vecteezy.com/system/resources/previews/024/734/340/large_2x/cartoon-illustration-of-two-bananas-vector.jpg"
 
 
 async def _send_anime(author, guild, name: str, member, send) -> None:
@@ -4612,7 +4642,7 @@ async def _send_anime(author, guild, name: str, member, send) -> None:
             text = tr(gid, "anime.banana.measure", a=author.mention, cm=centimeters)
         else:
             text = tr(gid, "anime.banana.measure_for", a=author.mention, b=target.mention, cm=centimeters)
-        gif = None
+        gif = BANANA_IMAGE_URL
         if BANANA_IMAGE.exists():
             file = discord.File(BANANA_IMAGE, filename="banana.png")
             gif = "attachment://banana.png"
