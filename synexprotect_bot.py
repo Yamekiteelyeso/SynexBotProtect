@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.11.5"
+BOT_VERSION = "1.11.6"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -213,8 +213,8 @@ def build_serverinfo_embed(guild: discord.Guild) -> discord.Embed:
     boost_emoji = fixed_emoji("nitroboosterrmz1", 1566625344935436398, animated=True)
     crown = fixed_emoji("Crown", 1568198986622574734)
     boosts = fixed_emoji("Boosts", 1568198366763159602)
-    community = fixed_emoji("community", 1385211510736818176)
-    hashtag = fixed_emoji("white_hashtag", 1495581952978321640)
+    community = E("community11", "👥")
+    hashtag = E("white_hashtag2", "#️⃣")
     star = fixed_emoji("estrella_vacia", 1568200011660140544)
     logo = fixed_emoji("synexprotect", 1568001429258641661)
 
