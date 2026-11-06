@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.24.0"
+BOT_VERSION = "1.28.0"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -880,9 +880,15 @@ ADMIN_COMMANDS = [
     ("welcomes-setup", "Send new member welcomes to a channel.", "/welcomes-setup channel", "Manage Server"),
     ("tickets-log", "Ticket log: who opened it, who claimed it, duration, members and transcript.", "/tickets-log [number]", "Staff"),
     ("invites-setup", "Post a message whenever someone joins with an invite, with their invite count.", "/invites-setup channel", "Manage Server"),
-    ("invites-off", "Stop posting invite messages.", "/invites-off", "Manage Server"),
+    ("invites-off", "Reset the invite channel to the default. Invite messages always stay on.", "/invites-off", "Manage Server"),
     ("despedidas-setup", "Send a goodbye message to a channel when members leave.", "/despedidas-setup channel", "Manage Server"),
-    ("despedidas-off", "Turn goodbye messages off.", "/despedidas-off", "Manage Server"),
+    ("despedidas-off", "Reset the goodbye channel to the default. Goodbye messages always stay on.", "/despedidas-off", "Manage Server"),
+    ("boosts-setup", "Send a message when someone boosts the server (default: the welcome channel).", "/boosts-setup channel", "Manage Server"),
+    ("boosts-settings", "Configure boost messages: channel, color, title and text.", "/boosts-settings", "Manage Server"),
+    ("prefix", "Add a nickname prefix to everyone who has a role.", "/prefix role prefix", "Manage Roles"),
+    ("prefix-remove", "Remove a role's nickname prefix.", "/prefix-remove role", "Manage Roles"),
+    ("stats-setup", "Create the Stats category with live member count channels.", "/stats-setup", "Manage Channels"),
+    ("stats-settings", "Edit the Stats names, labels and refresh them.", "/stats-settings", "Manage Channels"),
     ("welcomes-settings", "Show the current welcome channel and buttons.", "/welcomes-settings", "Manage Server"),
     ("invites-settings", "Show the current invite channel and tracking.", "/invites-settings", "Manage Server"),
     ("despedidas-settings", "Show the current goodbye channel.", "/despedidas-settings", "Manage Server"),
@@ -912,8 +918,9 @@ HELP_CATEGORIES = {
     "admin": [
         ("Giveaways", ["giveaway create", "giveaway end", "giveaway reroll"]),
         ("Tickets", ["tickets-setup", "categorytickets", "tickets-log", "tickets-settings"]),
-        ("Welcome & roles", ["welcomes-setup", "welcomes-settings", "autorol", "autorol-off", "autorol-settings", "addemojirole", "removeemojirole"]),
+        ("Welcome & roles", ["welcomes-setup", "welcomes-settings", "boosts-setup", "boosts-settings", "autorol", "autorol-off", "autorol-settings", "addemojirole", "removeemojirole"]),
         ("Invites & goodbyes", ["invites-setup", "invites-off", "invites-settings", "despedidas-setup", "despedidas-off", "despedidas-settings"]),
+        ("Stats & prefixes", ["prefix", "prefix-remove", "stats-setup", "stats-settings"]),
         ("Server name", ["servername", "servername-reset", "servername-settings"]),
         ("Moderation", ["ban", "unban", "kick", "mute", "unmute"]),
         ("Logs", ["modlog-setup", "modlog-events", "modlog-off", "modlog-settings"]),
@@ -2359,64 +2366,255 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
         embed=notice(f"{E('true', '✅')} Your ticket is ready: {channel.mention}"), ephemeral=True
     )
 
+from html import escape as html_escape
+from urllib.parse import urlparse as _urlparse
+
+MD_TOKEN_RE = re.compile(
+    r"```(?:[A-Za-z0-9+_-]*\n)?([\s\S]*?)```"
+    r"|`([^`\n]+)`"
+    r"|<(a?):(\w+):(\d+)>"
+    r"|<@!?(\d+)>"
+    r"|<@&(\d+)>"
+    r"|<#(\d+)>"
+    r"|\|\|([\s\S]+?)\|\|"
+    r"|\*\*([^*\n]+)\*\*"
+    r"|__([^_\n]+)__"
+    r"|~~([^~\n]+)~~"
+    r"|\*([^*\n]+)\*"
+    r"|(https?://[^\s<]+)"
+)
+
+
+def _plain_html(text: str) -> str:
+    return html_escape(text).replace("\n", "<br>")
+
+
+def _mention_html(text: str) -> str:
+    return f'<span class="mention">{html_escape(text)}</span>'
+
+
+def _md_html(text: str, guild) -> str:
+    out, pos = [], 0
+    for m in MD_TOKEN_RE.finditer(text or ""):
+        out.append(_plain_html(text[pos:m.start()]))
+        pos = m.end()
+        g = m.groups()
+        if g[0] is not None:
+            out.append(f"<pre>{html_escape(g[0])}</pre>")
+        elif g[1] is not None:
+            out.append(f"<code>{html_escape(g[1])}</code>")
+        elif g[4] is not None:
+            ext = "gif" if g[2] == "a" else "png"
+            name = html_escape(g[3])
+            out.append(f'<img class="emoji" src="https://cdn.discordapp.com/emojis/{g[4]}.{ext}" alt=":{name}:" title=":{name}:">')
+        elif g[5] is not None:
+            member = guild.get_member(int(g[5])) if guild else None
+            out.append(_mention_html("@" + (member.display_name if member else g[5])))
+        elif g[6] is not None:
+            role = guild.get_role(int(g[6])) if guild else None
+            out.append(_mention_html("@" + (role.name if role else "role")))
+        elif g[7] is not None:
+            channel = guild.get_channel(int(g[7])) if guild else None
+            out.append(_mention_html("#" + (channel.name if channel else "channel")))
+        elif g[8] is not None:
+            out.append(f'<span class="spoiler">{_md_html(g[8], guild)}</span>')
+        elif g[9] is not None:
+            out.append(f"<b>{_md_html(g[9], guild)}</b>")
+        elif g[10] is not None:
+            out.append(f"<u>{_md_html(g[10], guild)}</u>")
+        elif g[11] is not None:
+            out.append(f"<s>{_md_html(g[11], guild)}</s>")
+        elif g[12] is not None:
+            out.append(f"<i>{_md_html(g[12], guild)}</i>")
+        elif g[13] is not None:
+            url = html_escape(g[13], quote=True)
+            out.append(f'<a href="{url}">{html_escape(g[13])}</a>')
+    out.append(_plain_html(text[pos:] if text else ""))
+    return "".join(out)
+
+
+def _message_html(m: discord.Message, compact: bool) -> str:
+    guild = m.guild
+    pieces = []
+    if m.content:
+        pieces.append(f'<div class="text">{_md_html(m.content, guild)}</div>')
+    for e in m.embeds:
+        colour = f"#{(e.colour.value if e.colour else 0x4A505A):06x}"
+        inner = ""
+        if e.title:
+            inner += f'<div class="etitle">{_md_html(e.title, guild)}</div>'
+        if e.description:
+            inner += f'<div class="edesc">{_md_html(e.description, guild)}</div>'
+        for f in e.fields:
+            inner += f'<div class="efield"><b>{_md_html(f.name, guild)}</b><br>{_md_html(f.value, guild)}</div>'
+        if e.image and e.image.url:
+            inner += f'<img class="attachment" src="{html_escape(e.image.url, quote=True)}" alt="">'
+        if e.footer and e.footer.text:
+            inner += f'<div class="efoot">{_md_html(e.footer.text, guild)}</div>'
+        pieces.append(f'<div class="embed" style="border-left-color:{colour}">{inner or "[embed]"}</div>')
+    for a in m.attachments:
+        url = html_escape(a.url, quote=True)
+        name = html_escape(a.filename)
+        if (a.content_type or "").startswith("image/"):
+            pieces.append(f'<a href="{url}"><img class="attachment" src="{url}" alt="{name}"></a>')
+        else:
+            size = f"{a.size / 1024:.0f} KB" if a.size else ""
+            pieces.append(f'<a class="file" href="{url}">📎 {name} <span>{size}</span></a>')
+    for s in m.stickers:
+        label = html_escape(s.name)
+        pieces.append(f'<img class="sticker" src="{html_escape(s.url, quote=True)}" alt="{label}" title="{label}">')
+    if m.reactions:
+        chips = []
+        for r in m.reactions:
+            emoji = r.emoji
+            if isinstance(emoji, str):
+                label = emoji
+            else:
+                ext = "gif" if emoji.animated else "png"
+                label = f'<img class="emoji" src="https://cdn.discordapp.com/emojis/{emoji.id}.{ext}" alt=":{html_escape(emoji.name or "")}:">'
+            chips.append(f'<span class="chip">{label} {r.count}</span>')
+        pieces.append('<div class="reactions">' + "".join(chips) + "</div>")
+    if m.edited_at:
+        pieces.append('<span class="edited">(edited)</span>')
+
+    quote = ""
+    ref = m.reference.resolved if m.reference else None
+    if isinstance(ref, discord.Message):
+        snippet = (ref.content or "[attachment or embed]").replace("\n", " ")[:90]
+        quote = f'<div class="reply">↪ <b>{html_escape(ref.author.display_name)}</b> {html_escape(snippet)}</div>'
+    body = quote + ("".join(pieces) or "<i>[no content]</i>")
+
+    if compact:
+        return f'<div class="msg compact"><div class="body">{body}</div><span class="ts">{m.created_at:%H:%M}</span></div>'
+    color = ""
+    if isinstance(m.author, discord.Member) and m.author.color.value:
+        color = f' style="color:#{m.author.color.value:06x}"'
+    bot_tag = '<span class="bot">BOT</span>' if m.author.bot else ""
+    avatar = html_escape(m.author.display_avatar.url, quote=True)
+    name = html_escape(m.author.display_name)
+    return (
+        f'<div class="msg"><img class="avatar" src="{avatar}" alt="">'
+        f'<div class="body"><div class="head"><span class="name"{color}>{name}</span>{bot_tag}'
+        f'<span class="time">{m.created_at:%Y-%m-%d %H:%M UTC}</span></div>{body}</div></div>'
+    )
+
+
 async def _collect_transcript(channel: discord.TextChannel) -> tuple[bytes, dict[str, str]]:
     lines = []
     people: dict[str, str] = {}
     async for m in channel.history(limit=None, oldest_first=True):
         if not m.author.bot:
             people[str(m.author.id)] = str(m.author)
-        text = m.content or ""
-        if m.embeds:
-            text += " [embed]"
-        if m.attachments:
-            text += " " + " ".join(a.url for a in m.attachments)
-        lines.append(f"[{m.created_at:%Y-%m-%d %H:%M:%S} UTC] {m.author} ({m.author.id}): {text}")
+        who = f"{m.author.display_name} (@{m.author.name}, {m.author.id})" + (" [BOT]" if m.author.bot else "")
+        parts = []
+        ref = m.reference.resolved if m.reference else None
+        if isinstance(ref, discord.Message):
+            parts.append(f'(reply to {ref.author.display_name}: "{(ref.content or "")[:80]}")')
+        if m.content:
+            parts.append(m.content)
+        for e in m.embeds:
+            parts.append(f"[embed: {e.title or e.description or ''}]")
+        for a in m.attachments:
+            parts.append(a.url)
+        for s in m.stickers:
+            parts.append(f"[sticker: {s.name}]")
+        if m.edited_at:
+            parts.append("(edited)")
+        lines.append(f"[{m.created_at:%Y-%m-%d %H:%M:%S} UTC] {who}: " + " ".join(parts))
     return ("\n".join(lines) or "(no messages)").encode("utf-8"), people
 
-from html import escape as html_escape
 
+async def _build_html_transcript(channel: discord.TextChannel, info: dict | None = None) -> bytes:
+    info = info or {}
+    guild = channel.guild
+    messages = [m async for m in channel.history(limit=None, oldest_first=True)]
 
-async def _build_html_transcript(channel: discord.TextChannel) -> bytes:
-    rows = []
-    async for m in channel.history(limit=None, oldest_first=True):
-        when = m.created_at.strftime("%Y-%m-%d %H:%M UTC")
-        body = html_escape(m.content or "").replace("\n", "<br>")
-        extras = []
-        for a in m.attachments:
-            url = html_escape(a.url, quote=True)
-            if (a.content_type or "").startswith("image/"):
-                extras.append(f'<img class="attachment" src="{url}" alt="{html_escape(a.filename)}">')
-            else:
-                extras.append(f'<a href="{url}">{html_escape(a.filename)}</a>')
-        avatar = html_escape(m.author.display_avatar.url, quote=True)
-        rows.append(
-            '<div class="msg">'
-            f'<img class="avatar" src="{avatar}" alt="">'
-            '<div class="body">'
-            f'<div class="head"><span class="name">{html_escape(m.author.display_name)}</span>'
-            f'<span class="time">{when}</span></div>'
-            f'<div class="text">{body}</div>'
-            + "".join(extras) +
-            '</div></div>'
+    blocks, last = [], None
+    for m in messages:
+        compact = bool(
+            last is not None and last.author.id == m.author.id and not m.reference
+            and m.type == discord.MessageType.default
+            and (m.created_at - last.created_at).total_seconds() < 420
         )
+        blocks.append(_message_html(m, compact))
+        last = m
+
+    people: dict[int, discord.abc.User] = {}
+    for m in messages:
+        if not m.author.bot:
+            people.setdefault(m.author.id, m.author)
+
+    closed_at = datetime.now(timezone.utc)
+    opened = info.get("opened_at")
+    opened_dt = datetime.fromtimestamp(float(opened), tz=timezone.utc) if opened else None
+    duration = fmt_seconds(closed_at.timestamp() - float(opened)) if opened else "Unknown"
+    claimed = info.get("claimed_by")
+    rows = [
+        ("Ticket", html_escape(f"#{(info.get('number') or 0):04d} · {info.get('type', 'Ticket')}")),
+        ("Opened by", _md_html(f"<@{info['owner_id']}>", guild) if info.get("owner_id") else "Unknown"),
+        ("Claimed by", _md_html(f"<@{claimed}>" if str(claimed).isdigit() else str(claimed), guild) if claimed else "Nobody"),
+        ("Opened", opened_dt.strftime("%Y-%m-%d %H:%M UTC") if opened_dt else "Unknown"),
+        ("Closed", closed_at.strftime("%Y-%m-%d %H:%M UTC")),
+        ("Closed by", _md_html(info.get("closed_by") or "Unknown", guild)),
+        ("Duration", html_escape(duration)),
+        ("Messages", str(len(messages))),
+        ("Members", ", ".join(html_escape(p.display_name) for p in people.values()) or "None"),
+    ]
+    if info.get("reason"):
+        rows.append(("Reason", _md_html(info["reason"], guild)))
+    info_html = "".join(f'<div class="cell"><span>{label}</span><b>{value}</b></div>' for label, value in rows)
+
     title = html_escape(channel.name)
     page = (
         '<!doctype html><html><head><meta charset="utf-8">'
-        f'<title>{title}</title>'
-        '<style>'
-        'body{background:#1a1c20;color:#e6e8eb;font-family:system-ui,sans-serif;margin:0;padding:24px}'
-        '.wrap{max-width:860px;margin:auto}'
-        'h1{font-size:20px;color:#9aa1ac;font-weight:600;border-bottom:1px solid #2a2e35;padding-bottom:12px}'
-        '.msg{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid #2a2e35}'
-        '.avatar{width:40px;height:40px;border-radius:50%;flex:none}'
-        '.head{display:flex;gap:10px;align-items:baseline}.name{font-weight:600}'
-        '.time{font-size:12px;color:#9aa1ac}'
-        '.text{margin-top:4px;word-break:break-word}'
-        '.attachment{max-width:360px;border-radius:8px;margin-top:6px;display:block}'
-        '</style></head><body><div class="wrap">'
-        f'<h1>{title}</h1>'
-        + ("".join(rows) or "<p>No messages.</p>") +
-        '</div></body></html>'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f"<title>{title}</title>"
+        "<style>"
+        "body{background:#313338;color:#dbdee1;font-family:'gg sans',system-ui,-apple-system,sans-serif;margin:0;padding:24px;font-size:15px}"
+        ".wrap{max-width:900px;margin:auto}"
+        ".top{background:#2b2d31;border-radius:10px;padding:18px 20px;margin-bottom:20px}"
+        ".top h1{font-size:20px;margin:0 0 14px;color:#f2f3f5}"
+        ".info{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}"
+        ".cell span{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#949ba4}"
+        ".cell b{font-weight:500;color:#f2f3f5;word-break:break-word}"
+        ".msg{display:flex;gap:16px;padding:6px 16px;margin-top:14px;position:relative}"
+        ".msg.compact{margin-top:0;padding-top:2px;padding-bottom:2px;display:block}"
+        ".msg.compact:hover{background:#2e3035}"
+        ".msg.compact .ts{position:absolute;left:4px;font-size:11px;color:#949ba4;opacity:0}"
+        ".msg.compact:hover .ts{opacity:1}"
+        ".avatar{width:40px;height:40px;border-radius:50%;flex:none;margin-top:2px}"
+        ".body{min-width:0;flex:1}"
+        ".head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}"
+        ".name{font-weight:600;color:#f2f3f5}"
+        ".bot{background:#5865f2;color:#fff;font-size:10px;font-weight:600;border-radius:4px;padding:1px 4px}"
+        ".time{font-size:12px;color:#949ba4}"
+        ".text{white-space:normal;word-break:break-word;line-height:1.4}"
+        ".reply{font-size:13px;color:#b5bac1;border-left:3px solid #4e5058;padding-left:8px;margin-bottom:4px}"
+        ".mention{background:rgba(88,101,242,.3);color:#c9cdfb;border-radius:3px;padding:0 2px}"
+        ".edited{font-size:11px;color:#949ba4;margin-left:4px}"
+        "code{background:#1e1f22;border-radius:4px;padding:1px 4px;font-size:13px}"
+        "pre{background:#1e1f22;border-radius:6px;padding:8px;overflow:auto;font-size:13px;white-space:pre-wrap}"
+        ".spoiler{background:#1e1f22;color:#1e1f22;border-radius:3px;padding:0 3px}"
+        ".spoiler:hover{color:#dbdee1}"
+        "a{color:#00a8fc;word-break:break-all}"
+        ".emoji{width:22px;height:22px;vertical-align:-5px}"
+        ".sticker{width:160px;margin-top:6px}"
+        ".attachment{max-width:420px;border-radius:8px;margin-top:6px;display:block}"
+        ".file{display:inline-block;background:#2b2d31;border-radius:6px;padding:6px 10px;margin-top:6px;text-decoration:none}"
+        ".file span{color:#949ba4;font-size:12px}"
+        ".embed{background:#2b2d31;border-left:4px solid #4a505a;border-radius:4px;padding:8px 12px;margin-top:6px;max-width:520px}"
+        ".etitle{font-weight:600;color:#f2f3f5;margin-bottom:4px}"
+        ".edesc{font-size:14px}"
+        ".efield{margin-top:6px;font-size:14px}"
+        ".efoot{font-size:12px;color:#949ba4;margin-top:6px}"
+        ".reactions{margin-top:6px;display:flex;gap:6px;flex-wrap:wrap}"
+        ".chip{background:#2b2d31;border:1px solid #3f4147;border-radius:8px;padding:2px 6px;font-size:13px}"
+        ".foot{margin-top:24px;font-size:12px;color:#949ba4;text-align:center}"
+        "</style></head><body><div class=\"wrap\">"
+        f'<div class="top"><h1>{title}</h1><div class="info">{info_html}</div></div>'
+        + ("".join(blocks) or "<p>No messages.</p>") +
+        f'<div class="foot">{html_escape(BOT_NAME)} · {len(messages)} messages · exported {closed_at:%Y-%m-%d %H:%M UTC}</div>'
+        "</div></body></html>"
     )
     return page.encode("utf-8")
 
@@ -2430,7 +2628,11 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
     data, people, html_data = None, {}, None
     if SAVE_TRANSCRIPTS:
         data, people = await _collect_transcript(channel)
-        html_data = await _build_html_transcript(channel)
+        html_data = await _build_html_transcript(channel, {
+            "number": ticket.get("number"), "type": ticket.get("type"), "owner_id": ticket["user_id"],
+            "claimed_by": ticket.get("claimed_by"), "opened_at": ticket["opened_at"],
+            "closed_by": closed_by, "reason": reason,
+        })
     _save_closed_ticket(channel, ticket, closed_by, data, people)
     duration = fmt_seconds(now_ts() - ticket["opened_at"])
     owner_mention = f"<@{ticket['user_id']}>"
@@ -2874,7 +3076,15 @@ async def tickets_setup(interaction: discord.Interaction):
 
 WELCOMES_FILE = DATA_DIR / "welcomes.json"
 WELCOME_SERVER_NAME = "Synex Protect"
-DEFAULT_WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID") or 1557387592192753747)
+DEFAULT_WELCOME_CHANNEL_ID = 1557387592192753747
+DEFAULT_INVITE_CHANNEL_ID = 1557388020393451652
+DEFAULT_GOODBYE_CHANNEL_ID = 1568289667210551306
+DEFAULT_BOOST_CHANNEL_ID = 1557682035143737424
+
+
+def target_channel(store: dict, gid, default_id: int) -> int:
+    """Messages always send: the server's chosen channel, or the default one."""
+    return store.get(str(gid)) or default_id
 welcome_config: dict[str, int] = {}
 
 def load_welcomes() -> None:
@@ -2934,8 +3144,8 @@ def save_goodbyes() -> None:
 
 
 async def _send_goodbye(member: discord.Member) -> None:
-    channel_id = goodbye_config.get(str(member.guild.id))
-    channel = member.guild.get_channel(channel_id) if channel_id else None
+    channel_id = target_channel(goodbye_config, member.guild.id, DEFAULT_GOODBYE_CHANNEL_ID)
+    channel = member.guild.get_channel(channel_id)
     if channel is None:
         return
     try:
@@ -2957,7 +3167,7 @@ async def despedidas_setup(interaction: discord.Interaction, channel: discord.Te
     )
 
 
-@bot.tree.command(name="despedidas-off", description="Turn goodbye messages off.")
+@bot.tree.command(name="despedidas-off", description="Reset the goodbye channel to the default (messages always stay on).")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -2971,6 +3181,95 @@ async def despedidas_off(interaction: discord.Interaction):
 
 bot.add_listener(_send_goodbye, "on_member_remove")
 load_goodbyes()
+
+BOOSTS_FILE = DATA_DIR / "boosts.json"
+boost_config: dict[str, dict] = {}
+BOOST_DEFAULT_COLOUR = 0x9B59B6
+
+
+def load_boosts() -> None:
+    global boost_config
+    boost_config = read_json(BOOSTS_FILE)
+
+
+def save_boosts() -> None:
+    write_json_atomic(BOOSTS_FILE, boost_config)
+
+
+def boost_channel_id(gid) -> int:
+    return boost_config.get(str(gid), {}).get("channel") or DEFAULT_BOOST_CHANNEL_ID
+
+
+def boost_color(gid) -> int:
+    return boost_config.get(str(gid), {}).get("color", BOOST_DEFAULT_COLOUR)
+
+
+def _save_boost_field(gid, key: str, value) -> None:
+    cfg = boost_config.setdefault(str(gid), {})
+    if value in (None, ""):
+        cfg.pop(key, None)
+    else:
+        cfg[key] = value
+    save_boosts()
+
+
+def _fill(template: str, **values) -> str:
+    for key, value in values.items():
+        template = template.replace("{" + key + "}", str(value))
+    return template
+
+
+@bot.tree.command(name="boosts-setup", description="Send a message when someone boosts the server.")
+@app_commands.describe(channel="The channel for boost messages")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def boosts_setup(interaction: discord.Interaction, channel: discord.TextChannel):
+    _save_boost_field(interaction.guild_id, "channel", channel.id)
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'boosts.set', channel=channel.mention)}"), ephemeral=True
+    )
+
+
+async def _on_member_boost(before: discord.Member, after: discord.Member) -> None:
+    if before.premium_since is not None or after.premium_since is None:
+        return
+    guild = after.guild
+    gid = guild.id
+    channel = guild.get_channel(boost_channel_id(gid))
+    if channel is None:
+        return
+    cfg = boost_config.get(str(gid), {})
+    stats = dict(level=guild.premium_tier, boosts=guild.premium_subscription_count)
+    title = (_fill(cfg["title"], name=after.display_name, member=after.mention, server=server_name(guild), **stats)
+             if cfg.get("title") else tr(gid, "boost.title", name=after.display_name, server=server_name(guild)))
+    body = (_fill(cfg["body"], name=after.display_name, member=after.mention, server=server_name(guild), **stats)
+            if cfg.get("body") else tr(gid, "boost.body", name=after.mention, server=server_name(guild)))
+    boosts = fixed_emoji("Boosts", 1568198366763159602)
+    head = discord.ui.Section(
+        discord.ui.TextDisplay(f"# {boosts} {title}"),
+        accessory=discord.ui.Thumbnail(after.display_avatar.url),
+    )
+    container = discord.ui.Container(
+        head,
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(body),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(tr(gid, "boost.stats", **stats)),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(f"-# {BOT_NAME} · Server boosts"),
+        accent_colour=boost_color(gid),
+    )
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
+    try:
+        await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as exc:
+        print(f"[boosts] could not post: {exc}")
+
+
+bot.add_listener(_on_member_boost, "on_member_update")
+load_boosts()
 
 LANGUAGES_FILE = DATA_DIR / "languages.json"
 guild_langs: dict[str, str] = {}
@@ -3027,12 +3326,17 @@ STRINGS = {
         "invites.message": "{who} invited {member} and has **{total}** invites",
         "invites.unknown": "**Unknown**",
         "invites.set": "Invite messages will be sent to {channel}.",
-        "invites.off": "Invite messages are off.",
+        "invites.off": "Invite messages always stay on. The channel was reset to the default.",
         "goodbye.title": "Goodbye, {name}",
         "goodbye.body": "{name} left **{server}**.\n«We hope to see you again soon.»",
         "goodbye.members": "Members now: {n}",
         "goodbye.set": "Goodbye messages will be sent to {channel}.",
-        "goodbye.off": "Goodbye messages are off.",
+        "goodbye.off": "Goodbye messages always stay on. The channel was reset to the default.",
+        "boosts.set": "Boost messages will be sent to {channel}.",
+        "boosts.saved": "Saved.",
+        "boost.title": "{name} just boosted {server}!",
+        "boost.body": "Thank you so much, {name}! You're helping **{server}** grow.",
+        "boost.stats": "The server is now **Level {level}** with **{boosts}** boosts.",
         "translate.need_text": "Reply to a message, or write the text after the language.",
         "translate.failed": "Could not translate. Try `eng`, `esp`, `por` or a code like `fr`.",
         "translate.not_found": "I couldn't find that message in this channel.",
@@ -3090,12 +3394,17 @@ STRINGS = {
         "invites.message": "{who} invitó a {member} y tiene **{total}** invitaciones",
         "invites.unknown": "**Desconocido**",
         "invites.set": "Los mensajes de invitación se enviarán a {channel}.",
-        "invites.off": "Los mensajes de invitación están apagados.",
+        "invites.off": "Los mensajes de invitación siempre están activos. El canal se restableció al predeterminado.",
         "goodbye.title": "Adiós, {name}",
         "goodbye.body": "{name} salió de **{server}**.\n«Esperamos verte pronto.»",
         "goodbye.members": "Miembros ahora: {n}",
         "goodbye.set": "Los mensajes de despedida se enviarán a {channel}.",
-        "goodbye.off": "Los mensajes de despedida están apagados.",
+        "goodbye.off": "Las despedidas siempre están activas. El canal se restableció al predeterminado.",
+        "boosts.set": "Los mensajes de boosts se enviarán a {channel}.",
+        "boosts.saved": "Guardado.",
+        "boost.title": "¡{name} acaba de potenciar {server}!",
+        "boost.body": "¡Muchas gracias, {name}! Ayudas a crecer a **{server}**.",
+        "boost.stats": "El servidor ahora está en **Nivel {level}** con **{boosts}** boosts.",
         "translate.need_text": "Responde a un mensaje o escribe el texto después del idioma.",
         "translate.failed": "No pude traducir. Prueba `eng`, `esp`, `por` o un código como `fr`.",
         "translate.not_found": "No encontré ese mensaje en este canal.",
@@ -3285,11 +3594,116 @@ NUKE_DEFAULTS = {
     "kick": (3, 15),
     "emoji_delete": (3, 10),
 }
+AUTOMOD_URL_RE = re.compile(
+    r"(?:https?://|www\.)\S+"
+    r"|(?<![\w@./-])(?:discord\.gg|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|gg|io|xyz|ru|me|to|co|us|info|dev|app|link|gift|ly|ga|tk|ml|cf|gq|top|site|online|store|shop|click|live|pro))(?:/\S*)?",
+    re.IGNORECASE,
+)
+GIF_HOSTS = ("tenor.com", "giphy.com")
+AUTOMOD_PUNISH = ["timeout", "kick", "ban"]
+AUTOMOD_LABELS = {"timeout": "Timeout", "kick": "Kick", "ban": "Ban"}
+_spam_hits: dict[tuple[int, int], deque] = {}
+
+
+def _is_gif_url(url: str) -> bool:
+    if not re.match(r"https?://", url, re.IGNORECASE):
+        url = "https://" + url
+    parsed = _urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if any(host == h or host.endswith("." + h) for h in GIF_HOSTS):
+        return True
+    return parsed.path.lower().endswith(".gif")
+
+
+def _has_blocked_link(text: str | None, allow_gifs: bool) -> bool:
+    for match in AUTOMOD_URL_RE.finditer(text or ""):
+        url = match.group(0).rstrip(".,!?)]>")
+        if allow_gifs and _is_gif_url(url):
+            continue
+        return True
+    return False
+
+
+async def _check_spam(message: discord.Message, spam: dict) -> None:
+    guild, author = message.guild, message.author
+    key = (guild.id, author.id)
+    times = _spam_hits.setdefault(key, deque())
+    now = time.monotonic()
+    times.append(now)
+    while times and now - times[0] > spam["seconds"]:
+        times.popleft()
+    if len(times) < spam["messages"]:
+        return
+    times.clear()
+    try:
+        await message.channel.purge(
+            limit=50, check=lambda m: m.author.id == author.id,
+            after=discord.utils.utcnow() - timedelta(minutes=2), reason="Anti-spam")
+    except discord.HTTPException:
+        pass
+    how = spam["punish"]
+    result = "done"
+    try:
+        if how == "timeout":
+            member = guild.get_member(author.id)
+            if member is None:
+                result = "not in the server"
+            else:
+                await member.timeout(timedelta(minutes=spam["timeout_minutes"]), reason="Anti-spam")
+        else:
+            result = await _punish(guild, author.id, how, "Anti-spam")
+    except discord.HTTPException as exc:
+        result = f"failed: {exc.text or exc}"
+    await _modlog(guild, "automod", "Spam detected", STEEL, author, [
+        ("Member", _who(author)),
+        ("Channel", _chan(message.channel)),
+        ("Limit", f"{spam['messages']} messages in {spam['seconds']}s"),
+        ("Punishment", f"{AUTOMOD_LABELS[how]} · {result}"),
+    ])
+
+
+async def _automod_on_message(message: discord.Message) -> None:
+    if message.guild is None or message.author.bot:
+        return
+    guild = message.guild
+    cfg = guild_cfg(guild.id)
+    if not cfg["enabled"]:
+        return
+    author = message.author
+    if _trusted(guild, author) or (isinstance(author, discord.Member) and author.guild_permissions.manage_messages):
+        return
+    automod = cfg["automod"]
+    links = automod["links"]
+    if links["enabled"] and _has_blocked_link(message.content, links["allow_gifs"]):
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            return
+        try:
+            await message.channel.send(
+                embed=notice(f"{E(['link~2', 'link_2', 'link2', 'link'], '🔗')} Links aren't allowed here. GIFs are fine."),
+                delete_after=6)
+        except discord.HTTPException:
+            pass
+        await _modlog(guild, "automod", "Link removed", STEEL, author, [
+            ("Member", _who(author)),
+            ("Channel", _chan(message.channel)),
+            ("Content", (message.content or "")[:900] or "None"),
+        ])
+        return
+    if automod["spam"]["enabled"]:
+        await _check_spam(message, automod["spam"])
+
+
+bot.add_listener(_automod_on_message, "on_message")
+
+
 PROTECTION_SECTIONS = [
     ("Overview", "overview", "Status and master switch"),
     ("Anti-nuke", "nuke", "Mass deletes, bans and kicks"),
     ("Anti-webhook", "webhook", "Block unauthorized webhooks"),
     ("Anti-raid", "raid", "Join floods and new accounts"),
+    ("Spam & links", "automod", "Anti-spam and link filter"),
     ("Trusted", "trusted", "Users and roles that skip checks"),
     ("Logs", "logs", "Where alerts are sent"),
 ]
@@ -3304,6 +3718,10 @@ DEFAULT_ANTIRAID = {
         for key, (limit, seconds) in NUKE_DEFAULTS.items()
     },
     "webhook": {"enabled": True, "limit": 1, "seconds": 60, "punish": "ban"},
+    "automod": {
+        "spam": {"enabled": True, "messages": 5, "seconds": 5, "punish": "timeout", "timeout_minutes": 10},
+        "links": {"enabled": True, "allow_gifs": True},
+    },
     "raid": {
         "join_enabled": True,
         "joins": 8,
@@ -3425,11 +3843,147 @@ async def _punish(guild: discord.Guild, user_id: int, how: str, reason: str) -> 
     return "done"
 
 
-async def _record_hit(guild: discord.Guild, label: str, rule: dict, executor) -> None:
+RESTORE_WINDOW_SECONDS = 900
+_deleted: dict[int, list[dict]] = {}
+
+
+def _channel_snapshot(channel) -> dict:
+    overwrites = []
+    for target, ow in channel.overwrites.items():
+        allow, deny = ow.pair()
+        overwrites.append({
+            "type": "role" if isinstance(target, discord.Role) else "member",
+            "id": target.id, "allow": allow.value, "deny": deny.value,
+        })
+    return {
+        "id": channel.id, "name": channel.name, "type": channel.type.name,
+        "category": channel.category_id, "position": channel.position, "overwrites": overwrites,
+        "topic": getattr(channel, "topic", None), "nsfw": getattr(channel, "nsfw", False),
+        "slowmode": getattr(channel, "slowmode_delay", 0), "bitrate": getattr(channel, "bitrate", 64000),
+        "user_limit": getattr(channel, "user_limit", 0),
+    }
+
+
+def _role_snapshot(role: discord.Role) -> dict:
+    return {
+        "id": role.id, "name": role.name, "permissions": role.permissions.value, "colour": role.colour.value,
+        "hoist": role.hoist, "mentionable": role.mentionable, "position": role.position,
+        "members": [m.id for m in role.members],
+    }
+
+
+def _remember_deleted(guild: discord.Guild, executor, kind: str, data: dict) -> None:
+    if executor is None:
+        return
+    cutoff = time.time() - RESTORE_WINDOW_SECONDS
+    items = [i for i in _deleted.get(guild.id, []) if i["time"] > cutoff]
+    items.append({"kind": kind, "executor": executor.id, "time": time.time(), "data": data})
+    _deleted[guild.id] = items
+
+
+def _take_deleted(guild: discord.Guild, executor_id: int, kind: str) -> list[dict]:
+    items = _deleted.get(guild.id, [])
+    taken = [i["data"] for i in items if i["executor"] == executor_id and i["kind"] == kind]
+    _deleted[guild.id] = [i for i in items if not (i["executor"] == executor_id and i["kind"] == kind)]
+    return taken
+
+
+async def _restore_items(guild: discord.Guild, items: list[dict]) -> tuple[list[str], list[str]]:
+    restored, failed = [], []
+    roles_map: dict[int, discord.Role] = {}
+    channels_map: dict[int, discord.abc.GuildChannel] = {}
+    reason = "Anti-nuke: restored deleted items"
+
+    def order(item: dict):
+        if "colour" in item:
+            return (0, item["position"])
+        if item["type"] == "category":
+            return (1, item["position"])
+        return (2, item["position"])
+
+    for item in sorted(items, key=order):
+        name = item["name"]
+        try:
+            if "colour" in item:
+                role = await guild.create_role(
+                    name=name, permissions=discord.Permissions(item["permissions"]),
+                    colour=discord.Colour(item["colour"]), hoist=item["hoist"],
+                    mentionable=item["mentionable"], reason=reason)
+                roles_map[item["id"]] = role
+                try:
+                    await role.edit(position=max(1, item["position"]), reason=reason)
+                except discord.HTTPException:
+                    pass
+                for uid in item["members"]:
+                    member = guild.get_member(uid)
+                    if member is not None:
+                        try:
+                            await member.add_roles(role, reason=reason)
+                        except discord.HTTPException:
+                            pass
+                restored.append(f"role **{name}**")
+                continue
+
+            overwrites = {}
+            for ow in item["overwrites"]:
+                if ow["type"] == "role":
+                    target = roles_map.get(ow["id"]) or guild.get_role(ow["id"])
+                else:
+                    target = guild.get_member(ow["id"])
+                if target is None:
+                    continue
+                overwrites[target] = discord.PermissionOverwrite.from_pair(
+                    discord.Permissions(ow["allow"]), discord.Permissions(ow["deny"]))
+            category = channels_map.get(item["category"]) if item["category"] else None
+            if category is None and item["category"]:
+                category = guild.get_channel(item["category"])
+            kind, pos = item["type"], item["position"]
+            if kind == "category":
+                obj = await guild.create_category(name, overwrites=overwrites, position=pos, reason=reason)
+            elif kind == "voice":
+                obj = await guild.create_voice_channel(
+                    name, category=category, overwrites=overwrites, position=pos,
+                    bitrate=item["bitrate"], user_limit=item["user_limit"], reason=reason)
+            elif kind == "forum":
+                obj = await guild.create_forum(
+                    name=name, category=category, overwrites=overwrites, position=pos,
+                    topic=item["topic"], nsfw=item["nsfw"], reason=reason)
+            elif kind in ("text", "news"):
+                obj = await guild.create_text_channel(
+                    name, category=category, overwrites=overwrites, position=pos, topic=item["topic"],
+                    nsfw=item["nsfw"], slowmode_delay=item["slowmode"], reason=reason)
+            else:
+                failed.append(f"**{name}** (type `{kind}` can't be restored)")
+                continue
+            channels_map[item["id"]] = obj
+            restored.append(f"channel **{name}**")
+        except Exception as exc:
+            print(f"[antiraid] restore failed for {name}: {exc}")
+            failed.append(f"**{name}**: {exc}")
+    return restored, failed
+
+
+async def _bot_added_by(guild: discord.Guild, user) -> str:
+    if user is None or not user.bot:
+        return ""
+    entry = await _audit_peek(guild, discord.AuditLogAction.bot_add, user.id, max_age=60 * 60 * 24 * 30)
+    adder = entry.user if entry is not None else None
+    return f"**Bot:** {user.mention} · added by {adder.mention if adder else 'Unknown'}"
+
+
+async def _dm_owner(guild: discord.Guild, title: str, lines: list[str], color: int = ERROR) -> None:
+    try:
+        owner = guild.owner or await guild.fetch_member(guild.owner_id)
+        await owner.send(embed=base_embed(title, "\n".join(lines), color))
+    except (discord.HTTPException, AttributeError) as exc:
+        print(f"[antiraid] could not DM owner: {exc}")
+
+
+async def _record_hit(guild: discord.Guild, label: str, rule: dict, executor, key: str | None = None) -> None:
     if executor is None or _trusted(guild, executor):
         return
-    key = (guild.id, executor.id, label)
-    times = _hits.setdefault(key, deque())
+    key_hit = (guild.id, executor.id, label)
+    times = _hits.setdefault(key_hit, deque())
     now = time.monotonic()
     times.append(now)
     while times and now - times[0] > rule["seconds"]:
@@ -3438,32 +3992,53 @@ async def _record_hit(guild: discord.Guild, label: str, rule: dict, executor) ->
         return
     times.clear()
     result = await _punish(guild, executor.id, rule["punish"], f"Anti-nuke: {label}")
-    await _alarm(
-        guild,
-        f"{E('Error', '⚠️')} Anti-nuke triggered",
-        [
-            f"**Action:** {label}",
-            f"**User:** {executor.mention} (`{executor.id}`)",
-            f"**Limit:** {rule['limit']} in {rule['seconds']}s",
-            f"**Punishment:** {PUNISH_LABELS[rule['punish']]} · {result}",
-        ],
-    )
+
+    lines = [
+        f"**Action:** {label}",
+        f"**{'Bot' if executor.bot else 'User'}:** {executor.mention} (`{executor.id}`)",
+    ]
+    added = await _bot_added_by(guild, executor)
+    if added:
+        lines.append(added)
+    lines.append(f"**Limit:** {rule['limit']} in {rule['seconds']}s")
+    lines.append(f"**Punishment:** {PUNISH_LABELS[rule['punish']]} · {result}")
+
+    if key in ("channel_delete", "role_delete"):
+        kind = "channel" if key == "channel_delete" else "role"
+        items = _take_deleted(guild, executor.id, kind)
+        if items:
+            names = [i["name"] for i in items]
+            lines.append(f"**Deleted ({len(items)}):** " + ", ".join(names)[:900])
+            restored, failed = await _restore_items(guild, items)
+            lines.append(f"**Restored ({len(restored)}):** " + (", ".join(restored)[:900] or "none"))
+            if failed:
+                lines.append(f"**Could not restore ({len(failed)}):** " + ", ".join(failed)[:700])
+            lines.append("-# Messages inside deleted channels can't be recovered by the bot.")
+
+    await _alarm(guild, f"{E('Error', '⚠️')} Anti-nuke triggered", lines)
+    await _dm_owner(guild, f"{E('Error', '⚠️')} Anti-nuke report · {guild.name}", lines)
 
 
-async def _nuke_event(guild: discord.Guild, key: str, target_id: int | None = None) -> None:
+async def _nuke_event(guild: discord.Guild, key: str, target_id: int | None = None, snapshot=None) -> None:
     cfg = guild_cfg(guild.id)
     rule = cfg["nuke"][key]
-    if not cfg["enabled"] or not rule["enabled"]:
-        return
     label, action = NUKE_RULES[key]
+    if not cfg["enabled"] or not rule["enabled"]:
+        if snapshot is not None:
+            entry = await _audit_entry(guild, action, target_id)
+            if entry is not None:
+                _remember_deleted(guild, entry.user, *snapshot)
+        return
     entry = await _audit_entry(guild, action, target_id)
     if entry is not None:
-        await _record_hit(guild, label, rule, entry.user)
+        if snapshot is not None:
+            _remember_deleted(guild, entry.user, *snapshot)
+        await _record_hit(guild, label, rule, entry.user, key)
 
 
 @bot.event
 async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
-    await _nuke_event(channel.guild, "channel_delete", channel.id)
+    await _nuke_event(channel.guild, "channel_delete", channel.id, snapshot=("channel", _channel_snapshot(channel)))
 
 
 @bot.event
@@ -3473,7 +4048,8 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
 
 @bot.event
 async def on_guild_role_delete(role: discord.Role):
-    await _nuke_event(role.guild, "role_delete", role.id)
+    snapshot = None if (role.managed or role.is_default()) else ("role", _role_snapshot(role))
+    await _nuke_event(role.guild, "role_delete", role.id, snapshot=snapshot)
 
 
 @bot.event
@@ -3505,9 +4081,14 @@ async def on_guild_emojis_update(guild: discord.Guild, before, after):
 async def on_webhooks_update(channel: discord.abc.GuildChannel):
     guild = channel.guild
     cfg = guild_cfg(guild.id)
+    entry = await _audit_entry(guild, discord.AuditLogAction.webhook_create)
+    if entry is not None and entry.user is not None:
+        name = getattr(entry.after, "name", None) or "Unknown"
+        await _modlog(guild, "webhook", "Webhook created", STEEL, entry.user, [
+            ("Channel", _chan(channel)), ("Name", name), ("Created by", _who(entry.user)),
+        ])
     if not cfg["enabled"] or not cfg["webhook"]["enabled"]:
         return
-    entry = await _audit_entry(guild, discord.AuditLogAction.webhook_create)
     if entry is None or entry.user is None or _trusted(guild, entry.user):
         return
     hook_id = getattr(entry.target, "id", None)
@@ -3883,10 +4464,58 @@ def _logs_section(guild, cfg, rule_key):
     return text, rows
 
 
+def _automod_cycle_action(guild: discord.Guild, path: tuple):
+    async def fn(interaction: discord.Interaction):
+        cfg = guild_cfg(guild.id)
+        current = _get(cfg, path)
+        _set(cfg, path, AUTOMOD_PUNISH[(AUTOMOD_PUNISH.index(current) + 1) % len(AUTOMOD_PUNISH)])
+        save_antiraid()
+        await interaction.response.edit_message(view=build_protection_layout(guild, "automod"))
+    return fn
+
+
+def _automod_section(guild, cfg, rule_key):
+    spam, links = cfg["automod"]["spam"], cfg["automod"]["links"]
+    timeout_text = f" for {spam['timeout_minutes']} min" if spam["punish"] == "timeout" else ""
+    text = (
+        f"{_status(spam['enabled'])} **Anti-spam** · {spam['messages']} messages in {spam['seconds']}s · "
+        f"{AUTOMOD_LABELS[spam['punish']]}{timeout_text}\n"
+        f"{_status(links['enabled'])} **Anti-links** · other links are deleted · GIFs "
+        f"{'allowed' if links['allow_gifs'] else 'blocked'}\n\n"
+        "-# Trusted members, people who can manage messages and bots are not checked."
+    )
+    rows = [
+        discord.ui.ActionRow(
+            _button(guild, "Spam on" if spam["enabled"] else "Spam off", E("synexprotect", "🛡️"),
+                    discord.ButtonStyle.success if spam["enabled"] else discord.ButtonStyle.secondary,
+                    _toggle_action(guild, ("automod", "spam", "enabled"), "automod")),
+            _button(guild, "Spam limits", E("support", "✏️"), discord.ButtonStyle.secondary,
+                    _modal_action(guild, "Spam limits", [
+                        ("Messages", ("automod", "spam", "messages"), 2, 30),
+                        ("Within seconds", ("automod", "spam", "seconds"), 1, 60),
+                        ("Timeout minutes", ("automod", "spam", "timeout_minutes"), 1, 40320),
+                    ], "automod")),
+            _button(guild, f"Punish: {AUTOMOD_LABELS[spam['punish']]}", E("Error", "⚠️"),
+                    discord.ButtonStyle.secondary, _automod_cycle_action(guild, ("automod", "spam", "punish"))),
+        ),
+        discord.ui.ActionRow(
+            _button(guild, "Links on" if links["enabled"] else "Links off",
+                    E(["link~2", "link_2", "link2", "link"], "🔗"),
+                    discord.ButtonStyle.success if links["enabled"] else discord.ButtonStyle.secondary,
+                    _toggle_action(guild, ("automod", "links", "enabled"), "automod")),
+            _button(guild, "GIFs allowed" if links["allow_gifs"] else "GIFs blocked", "🎞️",
+                    discord.ButtonStyle.secondary,
+                    _toggle_action(guild, ("automod", "links", "allow_gifs"), "automod")),
+        ),
+    ]
+    return text, rows
+
+
 SECTION_BUILDERS = {
     "overview": _overview_section,
     "nuke": _nuke_section,
     "webhook": _webhook_section,
+    "automod": _automod_section,
     "raid": _raid_section,
     "trusted": _trusted_section,
     "logs": _logs_section,
@@ -3946,6 +4575,8 @@ MODLOG_EVENTS = {
     "invite_create": "Invite created",
     "invite_delete": "Invite deleted",
     "invite_join": "Member joined by invite",
+    "webhook": "Webhooks created",
+    "automod": "Spam and links filtered",
     "voice": "Voice join, leave and move",
     "message_delete": "Messages deleted",
     "message_edit": "Messages edited",
@@ -4456,8 +5087,8 @@ async def _record_invite(member: discord.Member, inviter) -> None:
         invites_store["joins"].setdefault(gid, {})[str(member.id)] = inviter.id
         save_invites()
         total = counts[str(inviter.id)]
-    channel_id = invites_store["channels"].get(gid)
-    channel = guild.get_channel(channel_id) if channel_id else None
+    channel_id = target_channel(invites_store["channels"], gid, DEFAULT_INVITE_CHANNEL_ID)
+    channel = guild.get_channel(channel_id)
     if channel is None:
         return
     who = inviter.mention if inviter is not None else tr(guild.id, "invites.unknown")
@@ -4518,7 +5149,7 @@ async def invites_setup(interaction: discord.Interaction, channel: discord.TextC
     )
 
 
-@bot.tree.command(name="invites-off", description="Stop posting invite messages.")
+@bot.tree.command(name="invites-off", description="Reset the invite channel to the default (messages always stay on).")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.guild_only()
@@ -4539,6 +5170,7 @@ async def _log_invite_join(member: discord.Member) -> None:
     try:
         invites = await guild.invites()
     except discord.HTTPException:
+        await _record_invite(member, None)
         return
     previous = _invite_cache.get(guild.id, {})
     current = {invite.code: invite for invite in invites}
@@ -4558,6 +5190,50 @@ async def _log_invite_join(member: discord.Member) -> None:
         code_text, inviter_text, channel_text = "Unknown (vanity or unknown link)", "Unknown", "Unknown"
     fields = [("Member", _who(member)), ("Invite", code_text), ("Invited by", inviter_text), ("Channel", channel_text)]
     await _modlog(guild, "invite_join", "Member joined by invite", CHARCOAL, member, fields)
+
+
+async def _send_welcome(member: discord.Member) -> None:
+    channel = member.guild.get_channel(target_channel(welcome_config, member.guild.id, DEFAULT_WELCOME_CHANNEL_ID))
+    if channel is None:
+        return
+    try:
+        await channel.send(view=build_welcome_layout(member), allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as exc:
+        print(f"[welcome] could not post: {exc}")
+
+
+AUTOROLES_FILE = DATA_DIR / "autoroles.json"
+autoroles: dict[str, int] = {}
+
+
+def load_autoroles() -> None:
+    global autoroles
+    autoroles = read_json(AUTOROLES_FILE)
+
+
+def save_autoroles() -> None:
+    write_json_atomic(AUTOROLES_FILE, autoroles)
+
+
+async def _on_member_join(member: discord.Member) -> None:
+    if member.bot:
+        await _log_bot_join(member)
+    else:
+        await _log_invite_join(member)
+    if await _antiraid_join(member):
+        return
+    role_id = autoroles.get(str(member.guild.id))
+    if role_id:
+        role = member.guild.get_role(role_id)
+        if role is not None and role < member.guild.me.top_role:
+            try:
+                await member.add_roles(role, reason="Auto role on join")
+            except discord.HTTPException as exc:
+                print(f"[autorol] could not give role: {exc}")
+    await _send_welcome(member)
+
+
+bot.add_listener(_on_member_join, "on_member_join")
 
 
 import aiohttp
@@ -5075,7 +5751,7 @@ def invites_embed(guild: discord.Guild) -> discord.Embed:
     top = sorted(counts.items(), key=lambda item: item[1], reverse=True)[:3]
     top_text = "\n".join(f"{i}. <@{uid}> · **{n}**" for i, (uid, n) in enumerate(top, 1)) or "None yet"
     rows = [
-        ("Channel", _channel_text(guild, invites_store["channels"].get(gid))),
+        ("Channel", _channel_text(guild, target_channel(invites_store["channels"], gid, DEFAULT_INVITE_CHANNEL_ID))),
         ("Inviters tracked", str(len(counts))),
         ("Top inviters", top_text),
     ]
@@ -5095,8 +5771,8 @@ class InvitesPanel(SettingsPanel):
         save_invites()
         await self.show(interaction)
 
-    @discord.ui.button(label="Turn off", style=discord.ButtonStyle.danger, row=1)
-    async def turn_off(self, interaction, button):
+    @discord.ui.button(label="Default channel", style=discord.ButtonStyle.secondary, row=1)
+    async def default_channel(self, interaction, button):
         invites_store["channels"].pop(str(interaction.guild_id), None)
         save_invites()
         await self.show(interaction)
@@ -5117,6 +5793,379 @@ class InvitesPanel(SettingsPanel):
 async def invites_settings(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=invites_embed(interaction.guild), view=InvitesPanel(interaction.user.id), ephemeral=True)
+
+
+# Panel de configuración de boosts: /boosts-settings
+# ============================================================
+def boosts_embed(guild: discord.Guild) -> discord.Embed:
+    cfg = boost_config.get(str(guild.id), {})
+    rows = [
+        ("Channel", _channel_text(guild, boost_channel_id(guild.id))),
+        ("Color", f"#{boost_color(guild.id):06X}"),
+        ("Title", "Custom" if cfg.get("title") else "Default"),
+        ("Body", "Custom" if cfg.get("body") else "Default"),
+    ]
+    return _settings_embed("Boost settings", rows)
+
+
+def _boost_saver(key: str):
+    async def save(interaction: discord.Interaction, value: str):
+        _save_boost_field(interaction.guild_id, key, value)
+        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'boosts.saved')}"), ephemeral=True)
+    return save
+
+
+async def _save_boost_color(interaction: discord.Interaction, value: str):
+    try:
+        color = parse_color(value) if value else None
+    except ValueError:
+        return await interaction.response.send_message(
+            embed=error_notice("Use a color name from the list or a hex code like #9B59B6."), ephemeral=True)
+    _save_boost_field(interaction.guild_id, "color", color)
+    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'boosts.saved')}"), ephemeral=True)
+
+
+class BoostsPanel(SettingsPanel):
+    def __init__(self, owner_id: int):
+        super().__init__(owner_id)
+        self.add_item(ChannelPick("Pick the boost channel", self._set_channel))
+
+    def render(self, guild):
+        return boosts_embed(guild)
+
+    async def _set_channel(self, interaction, channel_id: int):
+        _save_boost_field(interaction.guild_id, "channel", channel_id)
+        await self.show(interaction)
+
+    @discord.ui.button(label="Default channel", style=discord.ButtonStyle.secondary, row=1)
+    async def default_channel(self, interaction, button):
+        _save_boost_field(interaction.guild_id, "channel", None)
+        await self.show(interaction)
+
+    @discord.ui.button(label="Color", style=discord.ButtonStyle.primary, row=1)
+    async def color(self, interaction, button):
+        await interaction.response.send_modal(TextModal(
+            "Boost color", "Color (name or hex, empty = default)", None, "#9B59B6", _save_boost_color))
+
+    @discord.ui.button(label="Title", style=discord.ButtonStyle.primary, row=1)
+    async def title(self, interaction, button):
+        cfg = boost_config.get(str(interaction.guild_id), {})
+        await interaction.response.send_modal(TextModal(
+            "Boost title", "Title ({name} {server} {level} {boosts})", cfg.get("title"),
+            "{name} just boosted {server}!", _boost_saver("title")))
+
+    @discord.ui.button(label="Text", style=discord.ButtonStyle.primary, row=1)
+    async def text(self, interaction, button):
+        cfg = boost_config.get(str(interaction.guild_id), {})
+        await interaction.response.send_modal(TextModal(
+            "Boost text", "Text ({name} {server} {level} {boosts})", cfg.get("body"),
+            "Thank you so much, {name}!", _boost_saver("body")))
+
+
+@bot.tree.command(name="boosts-settings", description="Configure boost messages: channel, color and text.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def boosts_settings(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        embed=boosts_embed(interaction.guild), view=BoostsPanel(interaction.user.id), ephemeral=True)
+
+
+# ---------- /prefix: nickname prefix for members with a role ----------
+PREFIX_FILE = DATA_DIR / "role_prefixes.json"
+prefix_config: dict[str, dict[str, str]] = read_json(PREFIX_FILE, {})
+
+
+def save_prefixes() -> None:
+    write_json_atomic(PREFIX_FILE, prefix_config)
+
+
+def _strip_prefix(name: str, prefixes) -> str:
+    for prefix in prefixes:
+        if name.startswith(prefix + " "):
+            return name[len(prefix) + 1:]
+    return name
+
+
+async def _sync_prefix(member: discord.Member) -> None:
+    rules = prefix_config.get(str(member.guild.id), {})
+    if not rules:
+        return
+    chosen = None
+    for role in sorted(member.roles, key=lambda r: r.position, reverse=True):
+        if str(role.id) in rules:
+            chosen = rules[str(role.id)]
+            break
+    current = member.nick
+    known = set(rules.values())
+    if chosen is None:
+        if not current:
+            return
+        desired = _strip_prefix(current, known) or None
+    else:
+        base = _strip_prefix(current, known) if current else (member.global_name or member.name)
+        desired = f"{chosen} {base}"[:32]
+    if desired == current:
+        return
+    try:
+        await member.edit(nick=desired, reason="Role prefix")
+    except discord.HTTPException as exc:
+        print(f"[prefix] could not set nickname: {exc}")
+
+
+async def _on_member_roles_prefix(before: discord.Member, after: discord.Member) -> None:
+    if before.roles != after.roles:
+        await _sync_prefix(after)
+
+
+bot.add_listener(_on_member_roles_prefix, "on_member_update")
+
+
+@bot.tree.command(name="prefix", description="Add a nickname prefix to everyone who has a role.")
+@app_commands.describe(role="The role that gets the prefix", prefix="Text shown before the name, e.g. [Staff]")
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.guild_only()
+async def prefix_cmd(interaction: discord.Interaction, role: discord.Role, prefix: app_commands.Range[str, 1, 12]):
+    prefix_config.setdefault(str(interaction.guild_id), {})[str(role.id)] = prefix.strip()
+    save_prefixes()
+    await interaction.response.defer(ephemeral=True)
+    members = list(role.members)
+    for member in members:
+        await _sync_prefix(member)
+        await asyncio.sleep(0.4)
+    await interaction.followup.send(
+        embed=notice(f"{E('true', '✅')} Prefix **{prefix.strip()}** set for {role.mention}. Updated {len(members)} member(s)."),
+        ephemeral=True)
+
+
+@bot.tree.command(name="prefix-remove", description="Remove a role's nickname prefix.")
+@app_commands.describe(role="The role whose prefix is removed")
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.guild_only()
+async def prefix_remove(interaction: discord.Interaction, role: discord.Role):
+    rules = prefix_config.get(str(interaction.guild_id), {})
+    old = rules.pop(str(role.id), None)
+    save_prefixes()
+    await interaction.response.defer(ephemeral=True)
+    if old:
+        for member in list(role.members):
+            if member.nick and member.nick.startswith(old + " "):
+                await _sync_prefix(member)
+            await asyncio.sleep(0.4)
+    await interaction.followup.send(
+        embed=notice(f"{E('true', '✅')} Prefix removed from {role.mention}." if old else "That role has no prefix."),
+        ephemeral=True)
+
+
+# ---------- Stats: live member counts in locked voice channels ----------
+STATS_FILE = DATA_DIR / "stats.json"
+stats_config: dict[str, dict] = read_json(STATS_FILE, {})
+STATS_DEFAULT_CATEGORY = "Stats"
+STATS_DEFAULT_LABELS = {"total": "Total members: {total}", "members": "Members: {members}", "bots": "Bots: {bots}"}
+_stats_pending: set[int] = set()
+
+
+def save_stats() -> None:
+    write_json_atomic(STATS_FILE, stats_config)
+
+
+def _stats_labels(gid) -> dict[str, str]:
+    labels = dict(STATS_DEFAULT_LABELS)
+    labels.update(stats_config.get(str(gid), {}).get("labels", {}))
+    return labels
+
+
+def _stats_counts(guild: discord.Guild) -> dict[str, int]:
+    bots = sum(1 for m in guild.members if m.bot)
+    total = guild.member_count or len(guild.members)
+    return {"total": total, "members": total - bots, "bots": bots}
+
+
+def _stats_overwrites(guild: discord.Guild) -> dict:
+    return {
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False, speak=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True),
+    }
+
+
+async def update_stats(guild: discord.Guild) -> None:
+    cfg = stats_config.get(str(guild.id))
+    if not cfg:
+        return
+    counts = _stats_counts(guild)
+    labels = _stats_labels(guild.id)
+    for key in ("total", "members", "bots"):
+        channel = guild.get_channel(cfg.get("channels", {}).get(key, 0))
+        if channel is None:
+            continue
+        name = _fill(labels[key], **counts)[:100]
+        if channel.name != name:
+            try:
+                await channel.edit(name=name, reason="Stats update")
+            except discord.HTTPException as exc:
+                print(f"[stats] could not rename: {exc}")
+
+
+def schedule_stats(guild: discord.Guild) -> None:
+    if guild.id in _stats_pending or str(guild.id) not in stats_config:
+        return
+    _stats_pending.add(guild.id)
+
+    async def runner():
+        try:
+            await asyncio.sleep(2)
+            await update_stats(guild)
+        finally:
+            _stats_pending.discard(guild.id)
+
+    bot.loop.create_task(runner())
+
+
+async def _stats_member_change(member: discord.Member) -> None:
+    schedule_stats(member.guild)
+
+
+async def _stats_startup() -> None:
+    for gid in list(stats_config):
+        guild = bot.get_guild(int(gid))
+        if guild is not None:
+            schedule_stats(guild)
+
+
+bot.add_listener(_stats_member_change, "on_member_join")
+bot.add_listener(_stats_member_change, "on_member_remove")
+bot.add_listener(_stats_startup, "on_ready")
+
+
+@bot.tree.command(name="stats-setup", description="Create the Stats category with live member count channels.")
+@app_commands.default_permissions(manage_channels=True)
+@app_commands.checks.has_permissions(manage_channels=True)
+@app_commands.guild_only()
+async def stats_setup(interaction: discord.Interaction):
+    gid = str(interaction.guild_id)
+    if gid in stats_config:
+        return await interaction.response.send_message(
+            embed=error_notice("Stats already exist. Use /stats-settings to edit them."), ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    overwrites = _stats_overwrites(guild)
+    category = await guild.create_category(STATS_DEFAULT_CATEGORY, overwrites=overwrites, reason="Stats setup")
+    counts = _stats_counts(guild)
+    labels = _stats_labels(guild.id)
+    channels = {}
+    for key in ("total", "members", "bots"):
+        channel = await guild.create_voice_channel(
+            _fill(labels[key], **counts)[:100], category=category, overwrites=overwrites, reason="Stats setup")
+        channels[key] = channel.id
+    stats_config[gid] = {"category": category.id, "channels": channels}
+    save_stats()
+    schedule_stats(guild)
+    await interaction.followup.send(
+        embed=notice(f"{E('true', '✅')} Stats created under **{category.name}**. Use /stats-settings to edit them."),
+        ephemeral=True)
+
+
+def stats_embed(guild: discord.Guild) -> discord.Embed:
+    cfg = stats_config.get(str(guild.id), {})
+    labels = _stats_labels(guild.id)
+    channels = cfg.get("channels", {})
+    rows = [
+        ("Category", _channel_text(guild, cfg.get("category"))),
+        ("Total label", f"`{labels['total']}`"),
+        ("Members label", f"`{labels['members']}`"),
+        ("Bots label", f"`{labels['bots']}`"),
+        ("Channels", "\n".join(_channel_text(guild, channels.get(k)) for k in ("total", "members", "bots"))),
+    ]
+    return _settings_embed("Stats settings", rows)
+
+
+def _stats_saver(field: str):
+    async def save(interaction: discord.Interaction, value: str):
+        cfg = stats_config.get(str(interaction.guild_id))
+        if not cfg:
+            return await interaction.response.send_message(
+                embed=error_notice("Stats are not set up. Use /stats-setup first."), ephemeral=True)
+        if field == "category":
+            category = interaction.guild.get_channel(cfg.get("category", 0))
+            if category is not None:
+                await category.edit(name=(value or STATS_DEFAULT_CATEGORY)[:100], reason="Stats settings")
+        else:
+            labels = cfg.setdefault("labels", {})
+            if value:
+                labels[field] = value
+            else:
+                labels.pop(field, None)
+        save_stats()
+        schedule_stats(interaction.guild)
+        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Saved."), ephemeral=True)
+    return save
+
+
+class StatsPanel(SettingsPanel):
+    def render(self, guild):
+        return stats_embed(guild)
+
+    @discord.ui.button(label="Category name", style=discord.ButtonStyle.primary, row=0)
+    async def category_name(self, interaction, button):
+        cfg = stats_config.get(str(interaction.guild_id), {})
+        category = interaction.guild.get_channel(cfg.get("category", 0))
+        await interaction.response.send_modal(TextModal(
+            "Category name", "Category name", category.name if category else None,
+            STATS_DEFAULT_CATEGORY, _stats_saver("category")))
+
+    @discord.ui.button(label="Total label", style=discord.ButtonStyle.primary, row=0)
+    async def total_label(self, interaction, button):
+        await self._label_modal(interaction, "total")
+
+    @discord.ui.button(label="Members label", style=discord.ButtonStyle.primary, row=0)
+    async def members_label(self, interaction, button):
+        await self._label_modal(interaction, "members")
+
+    @discord.ui.button(label="Bots label", style=discord.ButtonStyle.primary, row=0)
+    async def bots_label(self, interaction, button):
+        await self._label_modal(interaction, "bots")
+
+    async def _label_modal(self, interaction, key: str):
+        current = stats_config.get(str(interaction.guild_id), {}).get("labels", {}).get(key)
+        await interaction.response.send_modal(TextModal(
+            "Stat label", "Label ({total} {members} {bots})", current,
+            STATS_DEFAULT_LABELS[key], _stats_saver(key)))
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=1)
+    async def refresh(self, interaction, button):
+        await interaction.response.defer()
+        await update_stats(interaction.guild)
+        await interaction.edit_original_response(embed=stats_embed(interaction.guild), view=self)
+
+    @discord.ui.button(label="Remove", style=discord.ButtonStyle.danger, row=1)
+    async def remove(self, interaction, button):
+        cfg = stats_config.pop(str(interaction.guild_id), None)
+        save_stats()
+        if cfg:
+            guild = interaction.guild
+            for cid in list(cfg.get("channels", {}).values()) + [cfg.get("category")]:
+                channel = guild.get_channel(cid or 0)
+                if channel is not None:
+                    try:
+                        await channel.delete(reason="Stats removed")
+                    except discord.HTTPException as exc:
+                        print(f"[stats] could not delete: {exc}")
+        await interaction.response.edit_message(
+            embed=notice(f"{E('true', '✅')} Stats removed."), view=None)
+
+
+@bot.tree.command(name="stats-settings", description="Edit the Stats category: names, labels and refresh.")
+@app_commands.default_permissions(manage_channels=True)
+@app_commands.checks.has_permissions(manage_channels=True)
+@app_commands.guild_only()
+async def stats_settings(interaction: discord.Interaction):
+    if str(interaction.guild_id) not in stats_config:
+        return await interaction.response.send_message(
+            embed=error_notice("Stats are not set up. Use /stats-setup first."), ephemeral=True)
+    await interaction.response.send_message(
+        embed=stats_embed(interaction.guild), view=StatsPanel(interaction.user.id), ephemeral=True)
 
 
 # Panel de configuración de tickets: /tickets-settings
@@ -5735,7 +6784,7 @@ def goodbyes_embed(guild: discord.Guild) -> discord.Embed:
     gid = str(guild.id)
     st = goodbye_style.get(gid, {})
     rows = [
-        ("Channel", _channel_text(guild, goodbye_config.get(gid))),
+        ("Channel", _channel_text(guild, target_channel(goodbye_config, gid, DEFAULT_GOODBYE_CHANNEL_ID))),
         ("Title", "Custom" if st.get("title") else "Default"),
         ("Body", "Custom" if st.get("body") else "Default"),
         ("Footer", "Custom" if st.get("footer") else "Default"),
@@ -5782,12 +6831,6 @@ class WelcomesPanel(SettingsPanel):
 
     async def _set_channel(self, interaction, channel_id: int):
         welcome_config[str(interaction.guild_id)] = channel_id
-        save_welcomes()
-        await self.show(interaction)
-
-    @discord.ui.button(label="Turn off", style=discord.ButtonStyle.danger, row=1)
-    async def turn_off(self, interaction, button):
-        welcome_config[str(interaction.guild_id)] = None
         save_welcomes()
         await self.show(interaction)
 
@@ -5841,8 +6884,8 @@ class GoodbyesPanel(SettingsPanel):
         save_goodbyes()
         await self.show(interaction)
 
-    @discord.ui.button(label="Turn off", style=discord.ButtonStyle.danger, row=1)
-    async def turn_off(self, interaction, button):
+    @discord.ui.button(label="Default channel", style=discord.ButtonStyle.secondary, row=1)
+    async def default_channel(self, interaction, button):
         goodbye_config.pop(str(interaction.guild_id), None)
         save_goodbyes()
         await self.show(interaction)
