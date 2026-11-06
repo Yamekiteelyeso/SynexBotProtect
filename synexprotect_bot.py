@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.11.1"
+BOT_VERSION = "1.11.3"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -2269,6 +2269,8 @@ async def tickets_setup(interaction: discord.Interaction):
 
 WELCOMES_FILE = DATA_DIR / "welcomes.json"
 WELCOME_SERVER_NAME = "Synex Protect"
+# Default welcome channel. Override with the WELCOME_CHANNEL_ID variable on Railway, or /welcomes-setup.
+DEFAULT_WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID") or 1557387592192753747)
 welcome_config: dict[str, int] = {}  # guild_id -> channel_id
 
 
@@ -2331,8 +2333,8 @@ async def on_member_join(member: discord.Member):
             except discord.HTTPException as exc:
                 print(f"[autorol] could not give role: {exc}")
 
-    channel_id = welcome_config.get(str(member.guild.id))
-    if not channel_id:
+    channel_id = welcome_config.get(str(member.guild.id), DEFAULT_WELCOME_CHANNEL_ID)
+    if not channel_id:  # 0 means welcomes were turned off with /welcomes-off
         return
     channel = member.guild.get_channel(channel_id)
     if channel is None:
@@ -2388,12 +2390,26 @@ async def autorol_off(interaction: discord.Interaction):
     await interaction.response.send_message(embed=notice("Auto role is off."), ephemeral=True)
 
 
+@bot.tree.command(name="welcomes-on", description="Turn welcomes back on in the default welcome channel.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def welcomes_on(interaction: discord.Interaction):
+    welcome_config.pop(str(interaction.guild_id), None)  # back to the default channel
+    save_welcomes()
+    channel = interaction.guild.get_channel(DEFAULT_WELCOME_CHANNEL_ID)
+    where = channel.mention if channel else f"`{DEFAULT_WELCOME_CHANNEL_ID}`"
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} Welcomes are on in {where}."), ephemeral=True
+    )
+
+
 @bot.tree.command(name="welcomes-off", description="Stop sending new member welcomes.")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.guild_only()
 async def welcomes_off(interaction: discord.Interaction):
-    welcome_config.pop(str(interaction.guild_id), None)
+    welcome_config[str(interaction.guild_id)] = 0
     save_welcomes()
     await interaction.response.send_message(embed=notice("Welcomes are off."), ephemeral=True)
 
