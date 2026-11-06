@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.17.0"
+BOT_VERSION = "1.18.0"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -298,25 +298,32 @@ def build_userinfo_embed(member: discord.Member) -> discord.Embed:
     embed.add_field(name=f"Roles · {len(roles)}", value=role_text or "None", inline=False)
     return embed
 
-def build_botinfo_embed() -> discord.Embed:
+def build_botinfo_layout() -> discord.ui.LayoutView:
     uptime = (datetime.now(timezone.utc) - START_TIME).total_seconds()
-    total_users = sum(g.member_count or 0 for g in bot.guilds)
-
-    embed = base_embed(f"{E(['synexprotect', 'shield'], '🛡️')} {BOT_NAME}", "Utility and protection for your community.", INK)
-    if bot.user:
-        embed.set_thumbnail(url=bot.user.display_avatar.url)
-    embed.add_field(name="Uptime", value=fmt_seconds(uptime), inline=True)
-    embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)} ms", inline=True)
-    embed.add_field(name="Version", value=BOT_VERSION, inline=True)
-    embed.add_field(name="Servers", value=f"{len(bot.guilds):,}", inline=True)
-    embed.add_field(name="Users reached", value=f"{total_users:,}", inline=True)
-    embed.add_field(name="Commands", value=str(len(bot.tree.get_commands())), inline=True)
-    embed.add_field(
-        name="Runtime",
-        value=f"discord.py `{discord.__version__}` · Python `{platform.python_version()}`",
-        inline=False,
+    total_members = sum(g.member_count or 0 for g in bot.guilds)
+    commands_count = len(bot.tree.get_commands())
+    head = discord.ui.TextDisplay(
+        f"### {E(['synexprotect', 'shield'], '🛡️')} {BOT_NAME}\n-# Utility and protection for your community."
     )
-    return embed
+    if bot.user:
+        head = discord.ui.Section(head, accessory=discord.ui.Thumbnail(bot.user.display_avatar.url))
+    stats = discord.ui.TextDisplay(
+        f"**Servers** · {len(bot.guilds):,}\n"
+        f"**Members** · {total_members:,}\n"
+        f"**Commands** · {commands_count}\n"
+        f"**Uptime** · {fmt_seconds(uptime)}"
+    )
+    container = discord.ui.Container(
+        head,
+        discord.ui.Separator(),
+        stats,
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(f"-# {BOT_NAME} · v{BOT_VERSION}"),
+        accent_colour=STEEL,
+    )
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
+    return view
 
 def build_avatar(user: discord.abc.User) -> tuple[discord.Embed, discord.ui.View]:
     url = user.display_avatar.with_size(4096).url
@@ -717,11 +724,11 @@ async def user_prefix(ctx: commands.Context, member: Optional[discord.Member] = 
 
 @bot.tree.command(name="botinfo", description="Show statistics about the bot.")
 async def botinfo(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=build_botinfo_embed())
+    await interaction.response.send_message(view=build_botinfo_layout())
 
 @bot.command(name="botinfo")
 async def botinfo_prefix(ctx: commands.Context):
-    await ctx.send(embed=build_botinfo_embed())
+    await ctx.send(view=build_botinfo_layout())
 
 @bot.tree.command(name="avatar", description="Show a user's avatar in full size.")
 @app_commands.describe(member="The user whose avatar to show (default: you)")
@@ -3134,6 +3141,11 @@ MODLOG_EVENTS = {
     "invite_delete": "Invite deleted",
     "invite_join": "Member joined by invite",
     "voice": "Voice join, leave and move",
+    "message_delete": "Messages deleted",
+    "message_edit": "Messages edited",
+    "photo": "Photos and images uploaded",
+    "emoji": "Emojis created, deleted or renamed",
+    "sticker": "Stickers created, deleted or renamed",
 }
 MAX_TIMEOUT_SECONDS = 28 * 86400
 
@@ -3196,6 +3208,15 @@ MODLOG_ICONS = {
     "Joined voice": ("community", "🔊"),
     "Left voice": ("false", "❌"),
     "Moved voice": ("transfer", "🔁"),
+    "Message deleted": ("false", "🗑️"),
+    "Message edited": ("transfer", "✏️"),
+    "Photo uploaded": ("community", "🖼️"),
+    "Emoji created": ("true", "✅"),
+    "Emoji deleted": ("false", "❌"),
+    "Emoji renamed": ("transfer", "🔁"),
+    "Sticker created": ("true", "✅"),
+    "Sticker deleted": ("false", "❌"),
+    "Sticker renamed": ("transfer", "🔁"),
 }
 
 
@@ -3618,6 +3639,111 @@ async def _log_invite_join(member: discord.Member) -> None:
         code_text, inviter_text, channel_text = "Unknown (vanity or unknown link)", "Unknown", "Unknown"
     fields = [("Member", _who(member)), ("Invite", code_text), ("Invited by", inviter_text), ("Channel", channel_text)]
     await _modlog(guild, "invite_join", "Member joined by invite", CHARCOAL, member, fields)
+
+
+def _excerpt(text: str | None, limit: int = 900) -> str:
+    if not text:
+        return "*No text*"
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _skip_message_log(message: discord.Message) -> bool:
+    if message.guild is None or message.author.bot:
+        return True
+    cfg = modlog_cfg(message.guild.id)
+    return not cfg["channel"] or message.channel.id == cfg["channel"]
+
+
+async def _on_message_delete(message: discord.Message) -> None:
+    if _skip_message_log(message):
+        return
+    attachments = ", ".join(a.filename for a in message.attachments) or "None"
+    fields = [
+        ("Author", _who(message.author)),
+        ("Channel", _chan(message.channel)),
+        ("Content", _excerpt(message.content)),
+        ("Attachments", attachments),
+    ]
+    await _modlog(message.guild, "message_delete", "Message deleted", STEEL, message.author, fields)
+
+
+async def _on_message_edit(before: discord.Message, after: discord.Message) -> None:
+    if _skip_message_log(after) or before.content == after.content:
+        return
+    fields = [
+        ("Author", _who(after.author)),
+        ("Channel", _chan(after.channel)),
+        ("Before", _excerpt(before.content)),
+        ("After", _excerpt(after.content)),
+        ("Message", f"[Jump to message]({after.jump_url})"),
+    ]
+    await _modlog(after.guild, "message_edit", "Message edited", STEEL, after.author, fields)
+
+
+async def _on_message_photos(message: discord.Message) -> None:
+    if _skip_message_log(message):
+        return
+    images = [a for a in message.attachments if (a.content_type or "").startswith("image/")]
+    if not images:
+        return
+    links = "\n".join(f"[{a.filename}]({a.url})" for a in images[:10])
+    fields = [
+        ("Author", _who(message.author)),
+        ("Channel", _chan(message.channel)),
+        ("Images", str(len(images))),
+        ("Files", links),
+        ("Message", f"[Jump to message]({message.jump_url})"),
+    ]
+    await _modlog(message.guild, "photo", "Photo uploaded", STEEL, message.author, fields)
+
+
+async def _actor_of(guild: discord.Guild, action, target_id: int):
+    entry = await _audit_peek(guild, action, target_id, max_age=30)
+    return entry.user if entry else None
+
+
+async def _log_asset_changes(guild, event: str, kind: str, before, after, actions: tuple, label) -> None:
+    old = {a.id: a for a in before}
+    new = {a.id: a for a in after}
+    create_action, delete_action, update_action = actions
+    for asset_id, asset in new.items():
+        if asset_id not in old:
+            actor = await _actor_of(guild, create_action, asset_id)
+            fields = [(kind, label(asset)), ("Created by", actor.mention if actor else "Unknown")]
+            await _modlog(guild, event, f"{kind} created", STEEL, actor, fields)
+        elif old[asset_id].name != asset.name:
+            actor = await _actor_of(guild, update_action, asset_id)
+            fields = [(kind, label(asset)), ("Before", f"`{old[asset_id].name}`"),
+                      ("After", f"`{asset.name}`"), ("Renamed by", actor.mention if actor else "Unknown")]
+            await _modlog(guild, event, f"{kind} renamed", STEEL, actor, fields)
+    for asset_id, asset in old.items():
+        if asset_id not in new:
+            actor = await _actor_of(guild, delete_action, asset_id)
+            fields = [(kind, label(asset)), ("Deleted by", actor.mention if actor else "Unknown")]
+            await _modlog(guild, event, f"{kind} deleted", STEEL, actor, fields)
+
+
+async def _on_emojis_changed(guild, before, after) -> None:
+    await _log_asset_changes(
+        guild, "emoji", "Emoji", before, after,
+        (discord.AuditLogAction.emoji_create, discord.AuditLogAction.emoji_delete, discord.AuditLogAction.emoji_update),
+        lambda e: f"{e} `:{e.name}:`",
+    )
+
+
+async def _on_stickers_changed(guild, before, after) -> None:
+    await _log_asset_changes(
+        guild, "sticker", "Sticker", before, after,
+        (discord.AuditLogAction.sticker_create, discord.AuditLogAction.sticker_delete, discord.AuditLogAction.sticker_update),
+        lambda s: f"`{s.name}`",
+    )
+
+
+bot.add_listener(_on_message_delete, "on_message_delete")
+bot.add_listener(_on_message_edit, "on_message_edit")
+bot.add_listener(_on_message_photos, "on_message")
+bot.add_listener(_on_emojis_changed, "on_guild_emojis_update")
+bot.add_listener(_on_stickers_changed, "on_guild_stickers_update")
 
 
 @bot.event
