@@ -1,17 +1,3 @@
-"""
-SynexProtectBot - Discord utility & moderation helper bot.
-
-Requirements:
-    pip install -U "discord.py>=2.6" python-dotenv deep-translator
-
-Create a .env file next to this script:
-    DISCORD_TOKEN=your_bot_token_here
-
-Enable these in the Discord Developer Portal -> Bot:
-    - SERVER MEMBERS INTENT
-    - MESSAGE CONTENT INTENT  (required for prefix commands like !ping)
-"""
-
 import asyncio
 import io
 import json
@@ -34,9 +20,8 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.12.1"
+BOT_VERSION = "1.12.2"
 
-# Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
 SLATE = 0x2A2E35
@@ -88,9 +73,6 @@ COLOR_NAMES = {
     "Brown": 0x78350F,
 }
 
-
-# ---------------------------------------------------------------- helpers
-
 def base_embed(title: str | None = None, description: str | None = None, color: int = CHARCOAL) -> discord.Embed:
     embed = discord.Embed(title=title, description=description, color=color, timestamp=datetime.now(timezone.utc))
     if bot.user:
@@ -98,13 +80,10 @@ def base_embed(title: str | None = None, description: str | None = None, color: 
     embed.set_footer(text=f"{BOT_NAME} · v{BOT_VERSION}")
     return embed
 
-
 def notice(text: str, color: int = CHARCOAL) -> discord.Embed:
     return discord.Embed(description=text, color=color)
 
-
 def E(names, fallback: str = "") -> str:
-    """Return a server emoji by name (bot must be in the server that owns it), else fallback."""
     wanted = [names] if isinstance(names, str) else list(names)
     for name in wanted:
         for emoji in bot.emojis:
@@ -112,10 +91,8 @@ def E(names, fallback: str = "") -> str:
                 return str(emoji)
     return fallback
 
-
 def error_notice(text: str) -> discord.Embed:
     return discord.Embed(description=f"{E('Error', '⚠️')} {text}", color=ERROR)
-
 
 def load_reaction_roles() -> None:
     global reaction_roles
@@ -124,14 +101,11 @@ def load_reaction_roles() -> None:
     except (FileNotFoundError, json.JSONDecodeError):
         reaction_roles = {}
 
-
 def save_reaction_roles() -> None:
     REACTION_ROLES_FILE.write_text(json.dumps(reaction_roles, indent=2), encoding="utf-8")
 
-
 def emoji_key_from_partial(emoji: discord.PartialEmoji) -> str:
     return f"c{emoji.id}" if emoji.id else str(emoji.name).replace("\ufe0f", "")
-
 
 def emoji_key_from_input(text: str) -> str | None:
     text = text.strip()
@@ -141,7 +115,6 @@ def emoji_key_from_input(text: str) -> str | None:
     if text and not (text.isascii() and text.isalnum()):
         return text.replace("\ufe0f", "")
     return None
-
 
 def parse_color(value: str | None) -> int:
     if not value:
@@ -155,7 +128,6 @@ def parse_color(value: str | None) -> int:
         return int(value, 16)
     raise ValueError("invalid color")
 
-
 async def color_autocomplete(interaction: discord.Interaction, current: str):
     text = current.lower().strip()
     return [
@@ -164,13 +136,11 @@ async def color_autocomplete(interaction: discord.Interaction, current: str):
         if text in name.lower()
     ][:25]
 
-
 def parse_duration(text: str) -> int | None:
     matches = DURATION_RE.findall(text or "")
     if not matches:
         return None
     return sum(int(amount) * UNIT_SECONDS[unit.lower()] for amount, unit in matches)
-
 
 def fmt_seconds(seconds: int) -> str:
     days, seconds = divmod(int(seconds), 86400)
@@ -179,17 +149,12 @@ def fmt_seconds(seconds: int) -> str:
     parts = [f"{v}{u}" for v, u in ((days, "d"), (hours, "h"), (minutes, "m"), (seconds, "s")) if v]
     return " ".join(parts) or "0s"
 
-
 def progress_bar(percent: float, size: int = 12) -> str:
     filled = round(percent / 100 * size)
     return "▰" * filled + "▱" * (size - filled)
 
-
 def now_ts() -> int:
     return int(datetime.now(timezone.utc).timestamp())
-
-
-# ---------------------------------------------------------------- shared builders
 
 def build_ping_embed() -> discord.Embed:
     ms = round(bot.latency * 1000)
@@ -199,11 +164,8 @@ def build_ping_embed() -> discord.Embed:
     embed.add_field(name="Status", value=status, inline=True)
     return embed
 
-
 def fixed_emoji(name: str, emoji_id: int, animated: bool = False) -> str:
-    """Exact emoji by ID, so a same-named emoji elsewhere can't be picked by mistake."""
     return f"<{'a' if animated else ''}:{name}:{emoji_id}>"
-
 
 SERVER_SECTIONS = [
     ("Server", "server", "Overview of the server"),
@@ -211,17 +173,14 @@ SERVER_SECTIONS = [
     ("Emojis", "emojis", "All custom emojis in this server"),
 ]
 
-
 def _cap(text: str, limit: int = 3000) -> str:
     return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + " …"
-
 
 def server_overview_text(guild: discord.Guild) -> str:
     roles = [r for r in guild.roles if not r.is_default()]
     humans = sum(1 for m in guild.members if not m.bot)
     bots = sum(1 for m in guild.members if m.bot)
     text_count, voice_count = len(guild.text_channels), len(guild.voice_channels)
-    boost_emoji = fixed_emoji("nitroboosterrmz1", 1566625344935436398, animated=True)
     crown = fixed_emoji("Crown", 1568198986622574734)
     boosts = fixed_emoji("Boosts", 1568198366763159602)
     community = E("community11", "👥")
@@ -230,7 +189,7 @@ def server_overview_text(guild: discord.Guild) -> str:
     logo = fixed_emoji("synexprotect", 1568001429258641661)
     lines = [
         f"{crown} **Owner**\n{guild.owner.mention if guild.owner else 'Unknown'}",
-        f"{boosts} **Server Boosts**\nLevel {guild.premium_tier} • {guild.premium_subscription_count} Boosts {boost_emoji}",
+        f"{boosts} **Server Boosts**\nLevel {guild.premium_tier} • {guild.premium_subscription_count} Boosts",
         f"{community} **Members**\n{guild.member_count:,} Total • {humans:,} humans • {bots:,} bots",
         f"{hashtag} **Channels**\n{text_count} Text • {voice_count} Voice",
         f"{star} **Roles**\n{len(roles)} Total",
@@ -239,12 +198,9 @@ def server_overview_text(guild: discord.Guild) -> str:
     ]
     return "\n\n".join(lines)
 
-
 SERVER_ROLES_PER_PAGE = 10
 
-
 def server_roles_page(guild: discord.Guild, page: int) -> tuple[str, int, int]:
-    """Roles from highest to lowest, 10 per page. Returns (text, page, total_pages)."""
     roles = [r for r in reversed(guild.roles) if not r.is_default()]
     pages = max(1, -(-len(roles) // SERVER_ROLES_PER_PAGE))
     page = min(max(page, 0), pages - 1)
@@ -255,11 +211,9 @@ def server_roles_page(guild: discord.Guild, page: int) -> tuple[str, int, int]:
         text += f"\n-# Page {page + 1} of {pages}"
     return text, page, pages
 
-
 def server_emojis_text(guild: discord.Guild) -> str:
     body = " ".join(str(e) for e in guild.emojis) or "None"
     return f"**Emojis · {len(guild.emojis)}**\n{_cap(body)}"
-
 
 def build_server_layout(guild: discord.Guild, section: str = "server", page: int = 0) -> discord.ui.LayoutView:
     logo = fixed_emoji("synexprotect", 1568001429258641661)
@@ -322,7 +276,6 @@ def build_server_layout(guild: discord.Guild, section: str = "server", page: int
     view.add_item(discord.ui.Container(*children, accent_colour=CHARCOAL))
     return view
 
-
 def build_userinfo_embed(member: discord.Member) -> discord.Embed:
     roles = [r for r in reversed(member.roles) if not r.is_default()]
     role_text = " ".join(r.mention for r in roles[:15]) + (f" +{len(roles) - 15} more" if len(roles) > 15 else "")
@@ -340,7 +293,6 @@ def build_userinfo_embed(member: discord.Member) -> discord.Embed:
     embed.add_field(name="Account created", value=discord.utils.format_dt(member.created_at, "D"), inline=True)
     embed.add_field(name=f"Roles · {len(roles)}", value=role_text or "None", inline=False)
     return embed
-
 
 def build_botinfo_embed() -> discord.Embed:
     uptime = (datetime.now(timezone.utc) - START_TIME).total_seconds()
@@ -362,7 +314,6 @@ def build_botinfo_embed() -> discord.Embed:
     )
     return embed
 
-
 def build_avatar(user: discord.abc.User) -> tuple[discord.Embed, discord.ui.View]:
     url = user.display_avatar.with_size(4096).url
     embed = base_embed(f"{user.display_name}", f"Avatar of {user.mention}", STEEL)
@@ -370,9 +321,6 @@ def build_avatar(user: discord.abc.User) -> tuple[discord.Embed, discord.ui.View
     view = discord.ui.View()
     view.add_item(discord.ui.Button(label="Download", url=url, style=discord.ButtonStyle.link, emoji="⬇️"))
     return embed, view
-
-
-# ---------------------------------------------------------------- events
 
 @bot.event
 async def on_ready():
@@ -388,7 +336,6 @@ async def on_ready():
     if not getattr(bot, "_tickets_loop_started", False):
         bot._tickets_loop_started = True
         asyncio.create_task(_inactivity_loop())
-    # Global commands can take up to an hour to show. Syncing per guild makes them appear now.
     for guild in bot.guilds:
         bot.tree.copy_global_to(guild=guild)
         synced = await bot.tree.sync(guild=guild)
@@ -396,13 +343,11 @@ async def on_ready():
     await bot.tree.sync()
     print(f"{BOT_NAME} online as {bot.user} ({len(bot.guilds)} servers)")
 
-
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
     if isinstance(error, (commands.CommandNotFound, commands.CheckFailure, commands.NoPrivateMessage)):
         return
     print(f"[prefix error] {error}")
-
 
 def _find_rule(guild_id: int, emoji: discord.PartialEmoji, message_id: int) -> dict | None:
     key = emoji_key_from_partial(emoji)
@@ -411,7 +356,6 @@ def _find_rule(guild_id: int, emoji: discord.PartialEmoji, message_id: int) -> d
     if exact:
         return exact[0]
     return next((r for r in rules if r["emoji"] == key and r["message_id"] is None), None)
-
 
 @bot.tree.command(name="removeemojirole", description="Remove a reaction role rule.")
 @app_commands.describe(emoji="The emoji of the rule to remove", message_id="Optional: only the rule for this message")
@@ -438,7 +382,6 @@ async def removeemojirole(interaction: discord.Interaction, emoji: str, message_
         ephemeral=True,
     )
 
-
 @bot.event
 async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
     if payload.guild_id is None or payload.user_id == bot.user.id:
@@ -462,7 +405,6 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
         await member.remove_roles(role, reason="Reaction role removed")
     except discord.HTTPException as exc:
         print(f"[reaction roles] could not remove role: {exc}")
-
 
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
@@ -507,7 +449,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             except discord.HTTPException:
                 pass
 
-
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
@@ -524,9 +465,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     else:
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-
-# ---------------------------------------------------------------- /bot-say (admin)
-
 @bot.tree.command(name="bot-say", description="Send a message through the bot without revealing who sent it.")
 @app_commands.describe(message="The message to send", channel="Channel to send it in (default: this one)")
 @app_commands.default_permissions(manage_messages=True)
@@ -535,9 +473,6 @@ async def bot_say(interaction: discord.Interaction, message: str, channel: disco
     target = channel or interaction.channel
     await target.send(message, allowed_mentions=discord.AllowedMentions(everyone=False, roles=False))
     await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Message sent to {target.mention}."), ephemeral=True)
-
-
-# ---------------------------------------------------------------- /embed (admin)
 
 @bot.tree.command(name="embed", description="Send a custom embed. Every field is optional.")
 @app_commands.describe(
@@ -586,9 +521,6 @@ async def embed_cmd(
 
     await interaction.channel.send(embed=embed)
     await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Embed sent."), ephemeral=True)
-
-
-# ---------------------------------------------------------------- /emojisteal (admin)
 
 @bot.tree.command(name="emojisteal", description="Copy a custom emoji from another server into this one.")
 @app_commands.describe(
@@ -646,9 +578,6 @@ async def emojisteal(interaction: discord.Interaction, emoji: str, name: str | N
     embed = base_embed("😎 Emoji added", f"{created}  ·  `:{created.name}:`", CHARCOAL)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-
-# ---------------------------------------------------------------- /addemojirole (admin)
-
 async def _find_message(guild: discord.Guild, message_id: int, prefer: discord.abc.Messageable | None):
     if prefer is not None:
         try:
@@ -662,11 +591,9 @@ async def _find_message(guild: discord.Guild, message_id: int, prefer: discord.a
             continue
     return None
 
-
 async def _apply_reaction_role(guild: discord.Guild, emoji_text: str, role: discord.Role,
                                message: discord.Message | None, msg_id: int | None,
                                prefer: discord.abc.Messageable | None = None) -> str | None:
-    """Saves the rule and, when a message is given, the bot reacts with the emoji so members can click it."""
     me = guild.me
     if role.is_default() or role.managed or role >= me.top_role:
         return "I can't manage that role. Make sure it's below my highest role and isn't managed by an integration."
@@ -689,7 +616,6 @@ async def _apply_reaction_role(guild: discord.Guild, emoji_text: str, role: disc
         except discord.HTTPException as exc:
             return f"Rule saved, but I couldn't add the reaction: {exc.text or exc}. Make sure I'm in the server that owns that emoji."
     return None
-
 
 @bot.tree.command(name="addemojirole", description="Give a role when members react with an emoji.")
 @app_commands.describe(
@@ -724,12 +650,10 @@ async def addemojirole(
     embed.add_field(name="Works on", value=scope, inline=False)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-
 @bot.command(name="addemojirole")
 @commands.has_permissions(manage_roles=True)
 @commands.guild_only()
 async def addemojirole_prefix(ctx: commands.Context, emoji: str, role: discord.Role):
-    """Reply to a message, then type: !addemojirole <emoji> @role"""
     ref = ctx.message.reference
     target = ref.resolved if ref and isinstance(ref.resolved, discord.Message) else None
     if target is None:
@@ -740,34 +664,23 @@ async def addemojirole_prefix(ctx: commands.Context, emoji: str, role: discord.R
         return await ctx.send(embed=error_notice(error), delete_after=12)
     await ctx.send(embed=notice(f"{E('true', '✅')} {emoji} now gives {role.mention} on that message."), delete_after=8)
 
-
-# ---------------------------------------------------------------- /ping
-
 @bot.tree.command(name="ping", description="Show the bot's current latency.")
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message(embed=build_ping_embed())
 
-
 @bot.command(name="ping")
 async def ping_prefix(ctx: commands.Context):
     await ctx.send(embed=build_ping_embed())
-
-
-# ---------------------------------------------------------------- /serverinfo (prefix: !server)
 
 @bot.tree.command(name="serverinfo", description="Show statistics and information about this server.")
 @app_commands.guild_only()
 async def serverinfo(interaction: discord.Interaction):
     await interaction.response.send_message(view=build_server_layout(interaction.guild))
 
-
 @bot.command(name="server")
 @commands.guild_only()
 async def server_prefix(ctx: commands.Context):
     await ctx.send(view=build_server_layout(ctx.guild))
-
-
-# ---------------------------------------------------------------- /userinfo (prefix: !user)
 
 @bot.tree.command(name="userinfo", description="Show details about a user.")
 @app_commands.describe(member="The user to inspect (default: you)")
@@ -775,26 +688,18 @@ async def server_prefix(ctx: commands.Context):
 async def userinfo(interaction: discord.Interaction, member: discord.Member | None = None):
     await interaction.response.send_message(embed=build_userinfo_embed(member or interaction.user))
 
-
 @bot.command(name="user")
 @commands.guild_only()
 async def user_prefix(ctx: commands.Context, member: Optional[discord.Member] = None):
     await ctx.send(embed=build_userinfo_embed(member or ctx.author))
 
-
-# ---------------------------------------------------------------- /botinfo (prefix: !botinfo)
-
 @bot.tree.command(name="botinfo", description="Show statistics about the bot.")
 async def botinfo(interaction: discord.Interaction):
     await interaction.response.send_message(embed=build_botinfo_embed())
 
-
 @bot.command(name="botinfo")
 async def botinfo_prefix(ctx: commands.Context):
     await ctx.send(embed=build_botinfo_embed())
-
-
-# ---------------------------------------------------------------- /avatar (prefix: !avatar)
 
 @bot.tree.command(name="avatar", description="Show a user's avatar in full size.")
 @app_commands.describe(member="The user whose avatar to show (default: you)")
@@ -802,16 +707,11 @@ async def avatar(interaction: discord.Interaction, member: discord.User | None =
     embed, view = build_avatar(member or interaction.user)
     await interaction.response.send_message(embed=embed, view=view)
 
-
 @bot.command(name="avatar")
 async def avatar_prefix(ctx: commands.Context, member: Optional[discord.User] = None):
     embed, view = build_avatar(member or ctx.author)
     await ctx.send(embed=embed, view=view)
 
-
-# ---------------------------------------------------------------- help
-
-# (name, description, usage)
 PUBLIC_COMMANDS = [
     ("ping", "Show the bot's current latency.", "/ping  ·  !ping"),
     ("serverinfo", "Statistics and information about this server.", "/serverinfo  ·  !server"),
@@ -823,7 +723,6 @@ PUBLIC_COMMANDS = [
     ("translate", "Translate text into another language.", "/translate language text"),
 ]
 
-# (name, description, usage, required permission)
 ADMIN_COMMANDS = [
     ("poll", "Public poll with live vote counts and up to five options.", "/poll question option1 option2 [option3] [option4] [option5]", "Manage Messages"),
     ("tickets-setup", "Post the ticket panel in this channel.", "/tickets-setup", "Manage Server"),
@@ -846,7 +745,6 @@ PREFIX_MAP = {
     "timer": "timer",
 }
 
-
 class CommandSelect(discord.ui.Select):
     def __init__(self, owner_id: int, entries: list[tuple], admin: bool):
         self.owner_id = owner_id
@@ -866,12 +764,10 @@ class CommandSelect(discord.ui.Select):
             embed.add_field(name="Required permission", value=entry[3], inline=True)
         await interaction.response.edit_message(embed=embed, view=self.view)
 
-
 class CommandView(discord.ui.View):
     def __init__(self, owner_id: int, entries: list[tuple], admin: bool = False):
         super().__init__(timeout=180)
         self.add_item(CommandSelect(owner_id, entries, admin))
-
 
 def build_help_embed() -> discord.Embed:
     lines = []
@@ -884,7 +780,6 @@ def build_help_embed() -> discord.Embed:
     embed.set_footer(text=f"{BOT_NAME} · Prefix: ! · v{BOT_VERSION}")
     return embed
 
-
 def build_helpadmin_embed() -> discord.Embed:
     lines = [f"**`/{name}`**  ·  *{perm}*\n{desc}" for name, desc, _, perm in ADMIN_COMMANDS]
     embed = base_embed("Administrator commands", "Restricted to members with the listed permission.\n​", INK)
@@ -892,18 +787,15 @@ def build_helpadmin_embed() -> discord.Embed:
     embed.set_footer(text=f"{BOT_NAME} · Admin panel · v{BOT_VERSION}")
     return embed
 
-
 @bot.tree.command(name="help", description="Show the list of available commands.")
 async def help_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=build_help_embed(), view=CommandView(interaction.user.id, PUBLIC_COMMANDS), ephemeral=True
     )
 
-
 @bot.command(name="help")
 async def help_prefix(ctx: commands.Context):
     await ctx.send(embed=build_help_embed(), view=CommandView(ctx.author.id, PUBLIC_COMMANDS))
-
 
 @bot.tree.command(name="helpadmin", description="Show the administrator command panel.")
 @app_commands.default_permissions(manage_messages=True)
@@ -915,18 +807,13 @@ async def helpadmin(interaction: discord.Interaction):
         ephemeral=True,
     )
 
-
 @bot.command(name="helpadmin")
 @commands.guild_only()
 @commands.has_permissions(manage_messages=True)
 async def helpadmin_prefix(ctx: commands.Context):
     await ctx.send(embed=build_helpadmin_embed(), view=CommandView(ctx.author.id, ADMIN_COMMANDS, admin=True))
 
-
-# ---------------------------------------------------------------- /poll (admin, public votes)
-
 class PollView(discord.ui.View):
-    """Public poll: buttons show live vote counts. Only admins can create polls."""
 
     def __init__(self, question: str, options: list[str]):
         super().__init__(timeout=None)
@@ -981,7 +868,6 @@ class PollView(discord.ui.View):
         embed.set_footer(text=f"{votes} · Click an option to vote · Click it again to remove your vote")
         return embed
 
-
 @bot.tree.command(name="poll", description="Create a public poll with live results. Admins only.")
 @app_commands.describe(
     question="The poll question",
@@ -1007,9 +893,6 @@ async def poll(
     view = PollView(question, options)
     await interaction.response.send_message(embed=view.build_embed(), view=view)
 
-
-# ---------------------------------------------------------------- /timer (private DM reminder)
-
 async def _finish_timer(channel: discord.abc.Messageable, user: discord.abc.User, text: str, delay: int) -> None:
     await asyncio.sleep(delay)
     done = base_embed("⏰ Timer finished", text, STEEL)
@@ -1023,9 +906,7 @@ async def _finish_timer(channel: discord.abc.Messageable, user: discord.abc.User
     except discord.HTTPException as exc:
         print(f"[timer] could not send DM: {exc}")
 
-
 async def _start_timer(channel: discord.abc.Messageable, user: discord.abc.User, seconds: int, text: str) -> bool:
-    """Posts a public timer in the channel (live countdown) and DMs the user when it ends."""
     ends = now_ts() + seconds
     embed = base_embed("⏰ Timer started", text, STEEL)
     embed.add_field(name="Set by", value=user.mention, inline=True)
@@ -1038,13 +919,11 @@ async def _start_timer(channel: discord.abc.Messageable, user: discord.abc.User,
     asyncio.create_task(_finish_timer(channel, user, text, seconds))
     return True
 
-
 def _parse_timer_time(time: str) -> int | None:
     seconds = parse_duration(time)
     if seconds is None or seconds < 5 or seconds > 30 * 86400:
         return None
     return seconds
-
 
 @bot.tree.command(name="timer", description="Start a timer everyone can see; you also get a DM when it ends.")
 @app_commands.describe(
@@ -1063,7 +942,6 @@ async def timer_cmd(interaction: discord.Interaction, time: str, reminder: str):
     await interaction.response.send_message(
         embed=notice(f"{E('true', '✅')} Timer set for **{fmt_seconds(seconds)}**. Everyone can see it here."), ephemeral=True
     )
-
 
 @bot.command(name="timer")
 @commands.guild_only()
@@ -1084,9 +962,6 @@ async def timer_prefix(ctx: commands.Context, *, args: str = ""):
     if not await _start_timer(ctx.channel, ctx.author, seconds, parts[1]):
         await ctx.send(embed=error_notice("I couldn't post the timer here."), delete_after=8)
 
-
-# ---------------------------------------------------------------- /translate
-
 @bot.tree.command(name="translate", description="Translate a text into another language.")
 @app_commands.describe(language="Target language code, e.g. en, es, fr, ja, de", text="The text to translate")
 async def translate(interaction: discord.Interaction, language: str, text: str):
@@ -1105,10 +980,6 @@ async def translate(interaction: discord.Interaction, language: str, text: str):
     embed.add_field(name=f"Translated · `{language.lower()}`", value=(translated or "—")[:1024], inline=False)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-
-# ---------------------------------------------------------------- giveaways (admin)
-# Built with Components V2 (discord.py 2.6+): one container with text, a divider and buttons.
-
 GIVEAWAY_LOCK = asyncio.Lock()
 JOIN_BUTTON_ID = "giveaway:join"
 ENTRIES_BUTTON_ID = "giveaway:entries"
@@ -1118,17 +989,14 @@ DEFAULT_RECLAIM = "1h"
 LINK_EMOJI = "<:link:1567987020503195842>"
 WON_EMOJI = "<a:emoji_25:1567977812617469990>"
 
-
 def _is_duration(token: str) -> bool:
     return bool(DURATION_TOKEN_RE.fullmatch(token))
-
 
 def _valid_seconds(text: str, low: int, high: int) -> int | None:
     seconds = parse_duration(text)
     if seconds is None or seconds < low or seconds > high:
         return None
     return seconds
-
 
 def _giveaway_top_and_body(data: dict) -> tuple[str, str]:
     if data["ended"]:
@@ -1145,7 +1013,6 @@ def _giveaway_top_and_body(data: dict) -> tuple[str, str]:
         f"Winners: {winners_value}"
     )
     return top, body
-
 
 def build_giveaway_layout(data: dict) -> discord.ui.LayoutView:
     top, body = _giveaway_top_and_body(data)
@@ -1181,7 +1048,6 @@ def build_giveaway_layout(data: dict) -> discord.ui.LayoutView:
     layout.add_item(container)
     return layout
 
-
 async def _join_callback(interaction: discord.Interaction):
     data = giveaways.get(interaction.message.id)
     if not data or data["ended"]:
@@ -1197,7 +1063,6 @@ async def _join_callback(interaction: discord.Interaction):
 
     await interaction.response.edit_message(view=build_giveaway_layout(data))
     await interaction.followup.send(embed=notice(msg), ephemeral=True)
-
 
 async def _entries_callback(interaction: discord.Interaction):
     data = giveaways.get(interaction.message.id)
@@ -1218,7 +1083,6 @@ async def _entries_callback(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-
 def _new_giveaway_data(host_id: int, channel_id: int, prize: str, seconds: int, winners: int, reclaim: int) -> dict:
     return {
         "prize": prize,
@@ -1231,12 +1095,11 @@ def _new_giveaway_data(host_id: int, channel_id: int, prize: str, seconds: int, 
         "ends_at": now_ts() + seconds,
         "seconds": seconds,
         "reclaim_seconds": reclaim,
-        "winners_list": [],     # current winners (after rerolls)
-        "past_winners": set(),  # everyone ever picked, never picked again
+        "winners_list": [],
+        "past_winners": set(),
         "claimed": set(),
-        "announce": {},         # uid -> info about the winner announcement
+        "announce": {},
     }
-
 
 async def _refresh_giveaway_message(gid: int) -> None:
     data = giveaways.get(gid)
@@ -1251,9 +1114,7 @@ async def _refresh_giveaway_message(gid: int) -> None:
     except discord.HTTPException:
         pass
 
-
 async def _ticker(gid: int) -> None:
-    """Refreshes the countdown every minute until the giveaway ends."""
     while True:
         data = giveaways.get(gid)
         if not data or data["ended"]:
@@ -1264,17 +1125,14 @@ async def _ticker(gid: int) -> None:
         await asyncio.sleep(min(60, remaining))
         await _refresh_giveaway_message(gid)
 
-
 async def _auto_end(gid: int, delay: int):
     await asyncio.sleep(delay)
     await _finish_giveaway(gid)
-
 
 def _register_giveaway(message: discord.Message, data: dict) -> None:
     data["message_id"] = message.id
     giveaways[message.id] = data
     asyncio.create_task(_auto_end(message.id, data["seconds"]))
-
 
 async def _resolve_user(uid: int) -> discord.User | None:
     user = bot.get_user(uid)
@@ -1285,15 +1143,11 @@ async def _resolve_user(uid: int) -> discord.User | None:
             return None
     return user
 
-
 def emoji_from_bot(name: str, fallback: str) -> str:
-    """Discord only renders an emoji for the bot if the bot is in the server that owns it."""
     found = next((e for e in bot.emojis if e.name == name), None)
     return str(found) if found else fallback
 
-
 def build_dm_layout(uid: int, info: dict, state: str) -> discord.ui.LayoutView:
-    """Private DM to the winner. state: 'pending', 'claimed' or 'rerolled'."""
     if state == "claimed":
         footer = f"{E('true', '✅')} Prize claimed. Enjoy!"
     elif state == "rerolled":
@@ -1326,7 +1180,6 @@ def build_dm_layout(uid: int, info: dict, state: str) -> discord.ui.LayoutView:
     layout.add_item(container)
     return layout
 
-
 async def _edit_dm(uid: int, info: dict, state: str) -> None:
     dm_id = info.get("dm_id")
     if not dm_id:
@@ -1340,9 +1193,7 @@ async def _edit_dm(uid: int, info: dict, state: str) -> None:
     except discord.HTTPException:
         pass
 
-
 def build_winner_layout(gid: int, uid: int, info: dict, state: str) -> discord.ui.LayoutView:
-    """state: 'pending' (claim button shown), 'claimed' or 'rerolled'."""
     data = giveaways.get(gid)
     prize = data["prize"] if data else "the prize"
 
@@ -1386,6 +1237,62 @@ def build_winner_layout(gid: int, uid: int, info: dict, state: str) -> discord.u
     layout.add_item(container)
     return layout
 
+async def _open_giveaway_ticket(guild: discord.Guild, user: discord.Member, prize: str) -> discord.TextChannel | None:
+    ttype = ticket_type("giveaways")
+    category_id = ticket_data.get("category_id") or TICKET_CATEGORY_ID
+    category = guild.get_channel(category_id) if category_id else None
+    ticket_data["counter"] += 1
+    number = ticket_data["counter"]
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        user: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True,
+        ),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, manage_channels=True,
+            manage_messages=True, read_message_history=True,
+        ),
+    }
+    roles = [r for r in (guild.get_role(rid) for rid in SUPPORT_ROLE_IDS) if r is not None]
+    for role in roles:
+        overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+    try:
+        channel = await guild.create_text_channel(
+            f"giveaway-{number:04d}-{slugify(user.name)}"[:100],
+            category=category,
+            overwrites=overwrites,
+            topic=f"ticket|owner:{user.id}|n:{number}|type:giveaways",
+            reason=f"Giveaway prize claimed by {user}",
+        )
+    except discord.HTTPException as exc:
+        print(f"[giveaway] could not open ticket: {exc}")
+        ticket_data["counter"] -= 1
+        return None
+
+    ticket = {
+        "user_id": user.id,
+        "type": ttype["label"] if ttype else "Giveaways",
+        "type_key": "giveaways",
+        "number": number,
+        "claimed_by": None,
+        "opened_at": now_ts(),
+        "last_activity": now_ts(),
+        "links_allowed": True,
+        "avatar": user.display_avatar.url,
+        "welcome_head": f"{user.mention}\n### {E('gift', '🎁')} Giveaway prize · {prize}",
+        "welcome_body": (
+            f"Congratulations **{user.display_name}**! Your prize **{prize}** is being handled in this ticket.\n\n"
+            "A staff member will be with you shortly.\n\n"
+            f"> **Category** · Giveaways\n> **Ticket** · #{number:04d}\n"
+            f"> **Opened** · {discord.utils.format_dt(discord.utils.utcnow(), 'f')}"
+        ),
+    }
+    ticket_data["open"][str(channel.id)] = ticket
+    layout = ticket_layout(ticket)
+    msg = await channel.send(view=layout, allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False))
+    ticket["message_id"] = msg.id
+    save_tickets()
+    return channel
 
 def _make_claim_callback(gid: int, uid: int):
     async def claim(interaction: discord.Interaction):
@@ -1409,8 +1316,13 @@ def _make_claim_callback(gid: int, uid: int):
         await interaction.response.edit_message(view=build_winner_layout(gid, uid, info, "claimed"))
         await _edit_dm(uid, info, "claimed")
 
-    return claim
+        channel = await _open_giveaway_ticket(interaction.guild, interaction.user, data["prize"])
+        if channel is not None:
+            await interaction.followup.send(
+                embed=notice(f"{E('true', '✅')} Your prize ticket is ready: {channel.mention}"), ephemeral=True
+            )
 
+    return claim
 
 async def _edit_announce(gid: int, uid: int, state: str) -> None:
     data = giveaways.get(gid)
@@ -1426,7 +1338,6 @@ async def _edit_announce(gid: int, uid: int, state: str) -> None:
     except discord.HTTPException:
         pass
     await _edit_dm(uid, info, state)
-
 
 async def _announce_winner(gid: int, uid: int) -> None:
     data = giveaways[gid]
@@ -1460,18 +1371,14 @@ async def _announce_winner(gid: int, uid: int) -> None:
 
     asyncio.create_task(_reclaim_watch(gid, uid, info["deadline"]))
 
-
 def _select_winners(gid: int, count: int) -> list[int]:
-    """Picks new winners from entries that were never picked before."""
     data = giveaways[gid]
     pool = [u for u in data["entries"] if u not in data["past_winners"]]
     chosen = random.sample(pool, min(count, len(pool))) if pool else []
     data["past_winners"].update(chosen)
     return chosen
 
-
 async def _replace_winner(gid: int, old_uid: int) -> bool:
-    """Caller must hold GIVEAWAY_LOCK."""
     data = giveaways[gid]
     data["winners_list"] = [w for w in data["winners_list"] if w != old_uid]
     if old_uid in data["announce"]:
@@ -1485,16 +1392,13 @@ async def _replace_winner(gid: int, old_uid: int) -> bool:
     await _refresh_giveaway_message(gid)
     return bool(chosen)
 
-
 async def _reclaim_watch(gid: int, uid: int, deadline: int) -> None:
-    """If the winner doesn't claim before the deadline, reroll automatically."""
     await asyncio.sleep(max(0, deadline - now_ts()))
     async with GIVEAWAY_LOCK:
         data = giveaways.get(gid)
         if not data or uid in data["claimed"] or uid not in data["winners_list"]:
             return
         await _replace_winner(gid, uid)
-
 
 async def _finish_giveaway(gid: int, count: int | None = None) -> list[int]:
     async with GIVEAWAY_LOCK:
@@ -1521,9 +1425,7 @@ async def _finish_giveaway(gid: int, count: int | None = None) -> list[int]:
             await _announce_winner(gid, uid)
         return chosen
 
-
 async def _reroll(gid: int) -> str | None:
-    """Rerolls every winner who has not claimed yet. Returns an error message, or None on success."""
     async with GIVEAWAY_LOCK:
         data = giveaways.get(gid)
         if not data:
@@ -1549,13 +1451,11 @@ async def _reroll(gid: int) -> str | None:
             return "No eligible entries left to reroll."
         return None
 
-
 def _parse_message_id(value: str) -> int | None:
     try:
         return int(value.strip())
     except ValueError:
         return None
-
 
 giveaway_group = app_commands.Group(
     name="giveaway",
@@ -1564,7 +1464,6 @@ giveaway_group = app_commands.Group(
     default_permissions=discord.Permissions(manage_guild=True),
 )
 bot.tree.add_command(giveaway_group)
-
 
 @giveaway_group.command(name="create", description="Create a giveaway.")
 @app_commands.describe(
@@ -1597,7 +1496,6 @@ async def giveaway_create(
     message = await interaction.original_response()
     _register_giveaway(message, data)
 
-
 @giveaway_group.command(name="end", description="End a giveaway early and pick the winner(s).")
 @app_commands.describe(message_id="ID of the giveaway message")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -1614,7 +1512,6 @@ async def giveaway_end(interaction: discord.Interaction, message_id: str):
     await interaction.response.send_message(embed=notice("Ending giveaway…"), ephemeral=True)
     await _finish_giveaway(gid)
 
-
 @giveaway_group.command(name="reroll", description="Reroll the winners who have not claimed their prize.")
 @app_commands.describe(message_id="ID of the giveaway message")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -1628,12 +1525,7 @@ async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
         return await interaction.response.send_message(embed=error_notice(error), ephemeral=True)
     await interaction.response.send_message(embed=notice(f"{E('true', '✅')} New winner selected."), ephemeral=True)
 
-
 def parse_giveaway_args(args: str) -> tuple[str, str, int, str] | None:
-    """
-    Parses '<prize> <duration> [winners] [timereclaim]' from the end of the text.
-    Examples:  Nitro 10h 1 1h  ·  Nitro 10h 1  ·  Nitro 10h
-    """
     t = args.split()
     winners, reclaim = 1, DEFAULT_RECLAIM
     if len(t) >= 4 and _is_duration(t[-1]) and t[-2].isdigit() and _is_duration(t[-3]):
@@ -1652,7 +1544,6 @@ def parse_giveaway_args(args: str) -> tuple[str, str, int, str] | None:
     if not prize:
         return None
     return prize, duration, winners, reclaim
-
 
 @bot.command(name="giveway", aliases=["giveaway"])
 @commands.guild_only()
@@ -1677,7 +1568,6 @@ async def giveway_prefix(ctx: commands.Context, *, args: str = ""):
     message = await ctx.send(view=build_giveaway_layout(data))
     _register_giveaway(message, data)
 
-
 @bot.command(name="reroll")
 @commands.guild_only()
 @commands.has_permissions(manage_guild=True)
@@ -1691,21 +1581,15 @@ async def reroll_prefix(ctx: commands.Context):
         return await ctx.send(embed=error_notice(error))
     await ctx.send(embed=notice(f"{E('true', '✅')} New winner selected."))
 
-
-# ---------------------------------------------------------------- tickets (preset)
-# The ticket system is configured in this file. /tickets-setup posts the panel.
-
-# ---- Fill these in with your server's IDs (Developer Mode on > right-click > Copy ID)
-TICKET_CATEGORY_ID: int | None = None        # category where ticket channels are created
-LOGS_CHANNEL_ID: int | None = None           # channel for opened / closed / claimed logs
-TRANSCRIPT_CHANNEL_ID: int | None = None     # channel where transcripts are saved
-SUPPORT_ROLE_IDS: list[int] = []             # staff roles that can see, claim and manage tickets
+TICKET_CATEGORY_ID: int | None = None
+LOGS_CHANNEL_ID: int | None = None
+TRANSCRIPT_CHANNEL_ID: int | None = None
+SUPPORT_ROLE_IDS: list[int] = []
 MAX_OPEN_PER_USER = 1
-INACTIVITY_HOURS = 0                         # 0 = never auto-close idle tickets
+INACTIVITY_HOURS = 0
 SAVE_TRANSCRIPTS = True
 DM_TRANSCRIPT_ON_CLOSE = True
 
-# ---- Panel
 PANEL_COLOR = STEEL
 PANEL_TEXT = """# {member} Ticket Panel
 
@@ -1752,8 +1636,6 @@ TICKET_TYPES = [
     },
 ]
 
-# ---- Welcome message posted inside each new ticket.
-# Placeholders: {user} {username} {number} {option} {roles} {server} {intro} {opened}
 WELCOME_COLOR = STEEL
 WELCOME_TITLE = "{welcome} Welcome, {username}!"
 WELCOME_BODY = (
@@ -1770,7 +1652,6 @@ TICKETS_FILE = DATA_DIR / "tickets_data.json"
 ticket_data: dict = {"counter": 0, "open": {}, "panel": {"channel_id": None, "message_id": None}}
 LINK_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 
-
 def load_tickets() -> None:
     global ticket_data
     try:
@@ -1779,24 +1660,19 @@ def load_tickets() -> None:
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
-
 def save_tickets() -> None:
     TICKETS_FILE.write_text(json.dumps(ticket_data, indent=2), encoding="utf-8")
 
-
 def ticket_type(key: str) -> dict | None:
     return next((t for t in TICKET_TYPES if t["key"] == key), None)
-
 
 def is_staff(member: discord.Member) -> bool:
     if member.guild_permissions.manage_guild:
         return True
     return any(role.id in SUPPORT_ROLE_IDS for role in member.roles)
 
-
 def can_manage_ticket(member: discord.Member, ticket: dict) -> bool:
     return member.id == ticket["user_id"] or is_staff(member)
-
 
 def fill(text: str, **values) -> str:
     out = text
@@ -1804,14 +1680,11 @@ def fill(text: str, **values) -> str:
         out = out.replace("{" + key + "}", str(value))
     return out
 
-
 def slugify(text: str) -> str:
     return re.sub(r"[^a-z0-9_-]+", "-", text.lower()).strip("-") or "ticket"
 
-
 def panel_text() -> str:
     return fill(PANEL_TEXT, member=E("GE_member", "🎫"), star=E("Estrella", "⭐"))
-
 
 async def _log(guild: discord.Guild, embed: discord.Embed) -> None:
     channel = guild.get_channel(LOGS_CHANNEL_ID) if LOGS_CHANNEL_ID else None
@@ -1820,9 +1693,6 @@ async def _log(guild: discord.Guild, embed: discord.Embed) -> None:
             await channel.send(embed=embed)
         except discord.HTTPException:
             pass
-
-
-# ---------------------------------------------------------------- panel
 
 def build_panel_view() -> discord.ui.View:
     view = discord.ui.View(timeout=None)
@@ -1838,10 +1708,8 @@ def build_panel_view() -> discord.ui.View:
     ))
     return view
 
-
 def build_panel_embed() -> discord.Embed:
     return discord.Embed(description=panel_text(), color=PANEL_COLOR)
-
 
 async def post_panel(channel: discord.abc.Messageable, guild: discord.Guild) -> discord.Message:
     message = await channel.send(embed=build_panel_embed(), view=build_panel_view())
@@ -1859,14 +1727,9 @@ async def post_panel(channel: discord.abc.Messageable, guild: discord.Guild) -> 
     save_tickets()
     return message
 
-
-# ---------------------------------------------------------------- ticket controls
-
 TICKET_TOPIC_RE = re.compile(r"^ticket\|owner:(\d+)\|n:(\d+)\|type:(\S+)")
 
-
 def build_ticket_controls(ticket: dict, head: str = "", body: str = "", avatar_url: str | None = None) -> discord.ui.LayoutView:
-    """Ticket welcome card: header, divider, details, staff menu on top, then the buttons, all in one gray container."""
     links_on = ticket.get("links_allowed", True)
     head = head or f"### Ticket #{ticket['number']:04d}"
     body = body or f"Ticket **{ticket['type']}**"
@@ -1911,13 +1774,10 @@ def build_ticket_controls(ticket: dict, head: str = "", body: str = "", avatar_u
     view.add_item(container)
     return view
 
-
 def ticket_layout(ticket: dict) -> discord.ui.LayoutView:
     return build_ticket_controls(ticket, ticket.get("welcome_head", ""), ticket.get("welcome_body", ""), ticket.get("avatar"))
 
-
 async def _sync_tickets_from_discord() -> None:
-    """Rebuild open tickets from their channels, so limits and buttons survive redeploys."""
     found: set[str] = set()
     for guild in bot.guilds:
         for channel in guild.text_channels:
@@ -1957,9 +1817,6 @@ async def _sync_tickets_from_discord() -> None:
         if cid not in found:
             ticket_data["open"].pop(cid)
     save_tickets()
-
-
-# ---------------------------------------------------------------- opening
 
 async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
     guild = interaction.guild
@@ -2051,9 +1908,6 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
         embed=notice(f"{E('true', '✅')} Your ticket is ready: {channel.mention}"), ephemeral=True
     )
 
-
-# ---------------------------------------------------------------- closing
-
 async def _transcript_bytes(channel: discord.TextChannel) -> bytes:
     lines = []
     async for m in channel.history(limit=None, oldest_first=True):
@@ -2064,7 +1918,6 @@ async def _transcript_bytes(channel: discord.TextChannel) -> bytes:
             text += " " + " ".join(a.url for a in m.attachments)
         lines.append(f"[{m.created_at:%Y-%m-%d %H:%M:%S} UTC] {m.author} ({m.author.id}): {text}")
     return ("\n".join(lines) or "(no messages)").encode("utf-8")
-
 
 async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, closed_by: str) -> None:
     ticket = ticket_data["open"].pop(str(channel.id), None)
@@ -2118,7 +1971,6 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
     except discord.HTTPException:
         pass
 
-
 class ConfirmView(discord.ui.View):
     def __init__(self, on_confirm, label: str = "Confirm", style: discord.ButtonStyle = discord.ButtonStyle.danger):
         super().__init__(timeout=60)
@@ -2130,11 +1982,9 @@ class ConfirmView(discord.ui.View):
     async def _confirm(self, interaction: discord.Interaction):
         await self.on_confirm(interaction)
 
-
 async def _confirm_close(interaction: discord.Interaction) -> None:
     await interaction.response.defer()
     await _close_ticket(interaction.guild, interaction.channel, interaction.user.mention)
-
 
 async def _request_close(interaction: discord.Interaction) -> None:
     ticket = ticket_data["open"].get(str(interaction.channel_id))
@@ -2150,9 +2000,6 @@ async def _request_close(interaction: discord.Interaction) -> None:
         ephemeral=True,
     )
 
-
-# ---------------------------------------------------------------- staff tools
-
 def _staff_only(interaction: discord.Interaction):
     ticket = ticket_data["open"].get(str(interaction.channel_id))
     if ticket is None:
@@ -2160,7 +2007,6 @@ def _staff_only(interaction: discord.Interaction):
     if not is_staff(interaction.user):
         return None, error_notice("Only staff can use this.")
     return ticket, None
-
 
 async def _claim(interaction: discord.Interaction) -> None:
     ticket, err = _staff_only(interaction)
@@ -2182,9 +2028,7 @@ async def _claim(interaction: discord.Interaction) -> None:
     log.add_field(name="Claimed by", value=interaction.user.mention, inline=True)
     await _log(interaction.guild, log)
 
-
 class UserPickView(discord.ui.View):
-    """Ephemeral picker: runs on_pick with the chosen member."""
 
     def __init__(self, placeholder: str, on_pick):
         super().__init__(timeout=120)
@@ -2198,7 +2042,6 @@ class UserPickView(discord.ui.View):
 
         select.callback = chosen
         self.add_item(select)
-
 
 async def _transfer(interaction: discord.Interaction) -> None:
     ticket, err = _staff_only(interaction)
@@ -2222,7 +2065,6 @@ async def _transfer(interaction: discord.Interaction) -> None:
         ephemeral=True,
     )
 
-
 async def _toggle_links(interaction: discord.Interaction) -> None:
     ticket, err = _staff_only(interaction)
     if err:
@@ -2230,7 +2072,6 @@ async def _toggle_links(interaction: discord.Interaction) -> None:
     ticket["links_allowed"] = not ticket.get("links_allowed", True)
     save_tickets()
     await interaction.response.edit_message(view=ticket_layout(ticket))
-
 
 class RenameModal(discord.ui.Modal, title="Rename channel"):
     new_name = discord.ui.TextInput(label="New channel name", max_length=90, placeholder="billing-issue")
@@ -2240,13 +2081,11 @@ class RenameModal(discord.ui.Modal, title="Rename channel"):
         await interaction.channel.edit(name=name, reason=f"Renamed by {interaction.user}")
         await interaction.response.send_message(embed=notice(f"{E('support', '✏️')} Channel renamed to `{name}`."), ephemeral=True)
 
-
 async def _rename(interaction: discord.Interaction) -> None:
     _, err = _staff_only(interaction)
     if err:
         return await interaction.response.send_message(embed=err, ephemeral=True)
     await interaction.response.send_modal(RenameModal())
-
 
 async def _add_or_remove_user(interaction: discord.Interaction, add: bool) -> None:
     ticket, err = _staff_only(interaction)
@@ -2271,7 +2110,6 @@ async def _add_or_remove_user(interaction: discord.Interaction, add: bool) -> No
 
     placeholder = "Pick a member to add…" if add else "Pick a member to remove…"
     await interaction.response.send_message(view=UserPickView(placeholder, on_pick), ephemeral=True)
-
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
@@ -2300,7 +2138,6 @@ async def on_interaction(interaction: discord.Interaction):
     except discord.HTTPException as exc:
         print(f"[tickets] interaction error: {exc}")
 
-
 @bot.event
 async def on_message(message: discord.Message):
     if message.guild is not None and not message.author.bot:
@@ -2318,7 +2155,6 @@ async def on_message(message: discord.Message):
                 except discord.HTTPException:
                     pass
     await bot.process_commands(message)
-
 
 async def _inactivity_loop() -> None:
     await bot.wait_until_ready()
@@ -2340,7 +2176,6 @@ async def _inactivity_loop() -> None:
                     save_tickets()
         await asyncio.sleep(600)
 
-
 @bot.tree.command(name="categorytickets", description="Choose the category where ticket channels are created.")
 @app_commands.describe(category="The category where new tickets will be opened")
 @app_commands.default_permissions(manage_channels=True)
@@ -2353,7 +2188,6 @@ async def categorytickets(interaction: discord.Interaction, category: discord.Ca
         embed=notice(f"{E('true', '✅')} New tickets will be opened in **{category.name}**."), ephemeral=True
     )
 
-
 @bot.tree.command(name="tickets-setup", description="Post the ticket panel in this channel.")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -2363,15 +2197,10 @@ async def tickets_setup(interaction: discord.Interaction):
     await post_panel(interaction.channel, interaction.guild)
     await interaction.followup.send(embed=notice(f"{E('true', '✅')} Panel posted in {interaction.channel.mention}."), ephemeral=True)
 
-
-# ---------------------------------------------------------------- welcomes (new members)
-
 WELCOMES_FILE = DATA_DIR / "welcomes.json"
 WELCOME_SERVER_NAME = "Synex Protect"
-# Default welcome channel. Override with the WELCOME_CHANNEL_ID variable on Railway, or /welcomes-setup.
 DEFAULT_WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID") or 1557387592192753747)
-welcome_config: dict[str, int] = {}  # guild_id -> channel_id
-
+welcome_config: dict[str, int] = {}
 
 def load_welcomes() -> None:
     global welcome_config
@@ -2380,18 +2209,14 @@ def load_welcomes() -> None:
     except (FileNotFoundError, json.JSONDecodeError):
         welcome_config = {}
 
-
 def save_welcomes() -> None:
     WELCOMES_FILE.write_text(json.dumps(welcome_config, indent=2), encoding="utf-8")
 
-
 WELCOME_LINKS = [
-    # (label, emoji names to try, url)
     ("See Rules", ["GE_rules"], "https://discord.com/channels/1557386505226420385/1557387851619106897"),
     ("Chat", ["community~1", "community_1", "community1", "community"], "https://discord.com/channels/1557386505226420385/1557389744957292555"),
     ("tickets", ["NofiTicket"], "https://discord.com/channels/1557386505226420385/1557389744957292555"),
 ]
-
 
 def build_welcome_layout(member: discord.Member) -> discord.ui.LayoutView:
     title = discord.ui.TextDisplay(f"# {E('GE_member', '👋')} Welcome to {WELCOME_SERVER_NAME},")
@@ -2420,7 +2245,6 @@ def build_welcome_layout(member: discord.Member) -> discord.ui.LayoutView:
     view.add_item(container)
     return view
 
-
 @bot.event
 async def on_member_join(member: discord.Member):
     role_id = autoroles.get(str(member.guild.id))
@@ -2433,7 +2257,7 @@ async def on_member_join(member: discord.Member):
                 print(f"[autorol] could not give role: {exc}")
 
     channel_id = welcome_config.get(str(member.guild.id), DEFAULT_WELCOME_CHANNEL_ID)
-    if not channel_id:  # 0 means welcomes were turned off with /welcomes-off
+    if not channel_id:
         return
     channel = member.guild.get_channel(channel_id)
     if channel is None:
@@ -2446,7 +2270,6 @@ async def on_member_join(member: discord.Member):
     except discord.HTTPException as exc:
         print(f"[welcomes] could not send welcome: {exc}")
 
-
 @bot.tree.command(name="welcomes-setup", description="Send new member welcomes to this channel.")
 @app_commands.describe(channel="The channel where welcomes will be sent")
 @app_commands.default_permissions(manage_guild=True)
@@ -2458,7 +2281,6 @@ async def welcomes_setup(interaction: discord.Interaction, channel: discord.Text
     await interaction.response.send_message(
         embed=notice(f"{E('true', '✅')} Welcomes will be sent in {channel.mention}."), ephemeral=True
     )
-
 
 @bot.tree.command(name="autorol", description="Give this role automatically to everyone who joins.")
 @app_commands.describe(role="The role new members receive")
@@ -2478,7 +2300,6 @@ async def autorol(interaction: discord.Interaction, role: discord.Role):
         embed=notice(f"{E('true', '✅')} New members will get {role.mention}."), ephemeral=True
     )
 
-
 @bot.tree.command(name="autorol-off", description="Stop giving the auto role to new members.")
 @app_commands.default_permissions(manage_roles=True)
 @app_commands.checks.has_permissions(manage_roles=True)
@@ -2488,20 +2309,18 @@ async def autorol_off(interaction: discord.Interaction):
     save_autoroles()
     await interaction.response.send_message(embed=notice("Auto role is off."), ephemeral=True)
 
-
 @bot.tree.command(name="welcomes-on", description="Turn welcomes back on in the default welcome channel.")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.guild_only()
 async def welcomes_on(interaction: discord.Interaction):
-    welcome_config.pop(str(interaction.guild_id), None)  # back to the default channel
+    welcome_config.pop(str(interaction.guild_id), None)
     save_welcomes()
     channel = interaction.guild.get_channel(DEFAULT_WELCOME_CHANNEL_ID)
     where = channel.mention if channel else f"`{DEFAULT_WELCOME_CHANNEL_ID}`"
     await interaction.response.send_message(
         embed=notice(f"{E('true', '✅')} Welcomes are on in {where}."), ephemeral=True
     )
-
 
 @bot.tree.command(name="welcomes-off", description="Stop sending new member welcomes.")
 @app_commands.default_permissions(manage_guild=True)
@@ -2512,10 +2331,7 @@ async def welcomes_off(interaction: discord.Interaction):
     save_welcomes()
     await interaction.response.send_message(embed=notice("Welcomes are off."), ephemeral=True)
 
-
-# ---------------------------------------------------------------- run
-
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("DISCORD_TOKEN is not set. Add it to your .env file.")
-    bot.run(TOKEN) 
+    bot.run(TOKEN)
