@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.22.0"
+BOT_VERSION = "1.24.0"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -761,7 +761,8 @@ PUBLIC_COMMANDS = [
     ("userinfo", "Account details for a member: join date, account age and roles.", "/userinfo [member]  ·  !user [member]"),
     ("botinfo", "Uptime, latency, server count and runtime information.", "/botinfo  ·  !botinfo"),
     ("avatar", "Show a member's avatar at full size, with a download button.", "/avatar [member]  ·  !avatar [member]"),
-    ("translate", "Translate any text into another language.", "/translate language text"),
+    ("translate", "Translate a text, a message ID, or reply to any message. Use eng, esp, por or a code like fr.", "/translate language [text] [message_id]  ·  !translate language (reply to a message)"),
+    ("afk", "Mark yourself as away. Mentions are logged and you get a summary when you come back.", "/afk [reason]  ·  !afk [reason]"),
     ("timer", "Start a timer everyone in the channel can see. You get a DM when it ends.", "/timer time reminder  ·  !timer time reminder"),
     ("hug", "Hug someone with an anime GIF. The person can hug back with one click.", "!hug [member]"),
     ("kiss", "Kiss someone with an anime GIF. The person can kiss back with one click.", "!kiss [member]"),
@@ -797,6 +798,11 @@ ADMIN_COMMANDS = [
     ("invites-off", "Stop posting invite messages.", "/invites-off", "Manage Server"),
     ("despedidas-setup", "Send a goodbye message to a channel when members leave.", "/despedidas-setup channel", "Manage Server"),
     ("despedidas-off", "Turn goodbye messages off.", "/despedidas-off", "Manage Server"),
+    ("welcomes-settings", "Show the current welcome channel and buttons.", "/welcomes-settings", "Manage Server"),
+    ("invites-settings", "Show the current invite channel and tracking.", "/invites-settings", "Manage Server"),
+    ("despedidas-settings", "Show the current goodbye channel.", "/despedidas-settings", "Manage Server"),
+    ("servername", "Set the name the bot uses for this server in its messages.", "/servername name", "Manage Server"),
+    ("servername-reset", "Use the real Discord server name again.", "/servername-reset", "Manage Server"),
     ("ban", "Ban a member, or a user by ID, and optionally delete their recent messages.", "/ban member [reason] [delete_days]  ·  !ban user [reason]", "Ban Members"),
     ("unban", "Unban a user by their ID.", "/unban user_id [reason]  ·  !unban user_id [reason]", "Ban Members"),
     ("kick", "Kick a member from the server.", "/kick member [reason]  ·  !kick member [reason]", "Kick Members"),
@@ -811,14 +817,15 @@ ADMIN_COMMANDS = [
 HELP_CATEGORIES = {
     "public": [
         ("Utility", ["ping", "serverinfo", "userinfo", "botinfo", "avatar"]),
-        ("Tools", ["translate", "timer", "help"]),
+        ("Tools", ["translate", "afk", "timer", "help"]),
         ("Anime reactions", ["hug", "kiss", "punch", "cry", "sleep", "banana"]),
     ],
     "admin": [
         ("Giveaways", ["giveaway create", "giveaway end", "giveaway reroll"]),
         ("Tickets", ["tickets-setup", "categorytickets", "tickets-log"]),
-        ("Welcome & roles", ["welcomes-setup", "welcomes-on", "welcomes-off", "welcomes-button", "welcomes-button-remove", "welcomes-buttons-reset", "autorol", "autorol-off", "addemojirole", "removeemojirole"]),
-        ("Invites & goodbyes", ["invites-setup", "invites-off", "despedidas-setup", "despedidas-off"]),
+        ("Welcome & roles", ["welcomes-setup", "welcomes-on", "welcomes-off", "welcomes-button", "welcomes-button-remove", "welcomes-buttons-reset", "welcomes-settings", "autorol", "autorol-off", "addemojirole", "removeemojirole"]),
+        ("Invites & goodbyes", ["invites-setup", "invites-off", "invites-settings", "despedidas-setup", "despedidas-off", "despedidas-settings"]),
+        ("Server name", ["servername", "servername-reset"]),
         ("Moderation", ["ban", "unban", "kick", "mute", "unmute"]),
         ("Logs", ["modlog-setup", "modlog-events", "modlog-off"]),
         ("Protection", ["antiraid"]),
@@ -905,7 +912,7 @@ def build_help_embed() -> discord.Embed:
         "Every command works as a slash command (`/`), and most also work with the prefix `!`. "
         "Pick a command in the menu below to see its full usage."
     )
-    embed = base_embed(f"{E('synexprotect', '🛡️')} Command center", intro, SLATE)
+    embed = base_embed("Command center", intro, SLATE)
     if bot.user:
         embed.set_thumbnail(url=bot.user.display_avatar.url)
     for name, value in _help_fields(PUBLIC_COMMANDS, HELP_CATEGORIES["public"], admin=False):
@@ -1110,23 +1117,90 @@ async def timer_prefix(ctx: commands.Context, *, args: str = ""):
     if not await _start_timer(ctx.channel, ctx.author, seconds, parts[1]):
         await ctx.send(embed=error_notice("I couldn't post the timer here."), delete_after=8)
 
-@bot.tree.command(name="translate", description="Translate a text into another language.")
-@app_commands.describe(language="Target language code, e.g. en, es, fr, ja, de", text="The text to translate")
-async def translate(interaction: discord.Interaction, language: str, text: str):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        translated = await asyncio.to_thread(
-            GoogleTranslator(source="auto", target=language.strip().lower()).translate, text
-        )
-    except Exception:
-        return await interaction.followup.send(
-            embed=error_notice("Could not translate. Check the language code (e.g. `en`, `es`)."), ephemeral=True
-        )
+import random
 
-    embed = base_embed(f"{E(['translate', 'globe'], '🌐')} Translation", color=STEEL)
-    embed.add_field(name="Original", value=text[:1024], inline=False)
-    embed.add_field(name=f"Translated · `{language.lower()}`", value=(translated or "—")[:1024], inline=False)
-    await interaction.followup.send(embed=embed, ephemeral=True)
+LANGUAGE_ALIASES = {
+    "esp": "es", "spa": "es", "spanish": "es", "español": "es", "espanol": "es",
+    "eng": "en", "english": "en", "ingles": "en", "inglés": "en",
+    "por": "pt", "port": "pt", "portuguese": "pt", "portugues": "pt", "português": "pt",
+}
+
+
+def _lang_code(value: str) -> str:
+    cleaned = value.strip().lower()
+    return LANGUAGE_ALIASES.get(cleaned, cleaned)
+
+
+async def _translate_text(text: str, language: str) -> str | None:
+    try:
+        return await asyncio.to_thread(GoogleTranslator(source="auto", target=language).translate, text)
+    except Exception:
+        return None
+
+
+async def _translation_payload(source_text: str, source_embed: discord.Embed | None, language: str) -> dict | None:
+    if source_embed is not None:
+        title = source_embed.title or ""
+        description = source_embed.description or ""
+        translated_title = await _translate_text(title, language) if title else ""
+        translated_description = await _translate_text(description, language) if description else ""
+        if translated_title is None or translated_description is None:
+            return None
+        embed = discord.Embed(title=translated_title or None, description=translated_description or None,
+                              color=source_embed.color or STEEL)
+        embed.set_footer(text=f"Translated to {language}")
+        return {"embed": embed}
+    translated = await _translate_text(source_text, language)
+    if translated is None:
+        return None
+    return {"content": translated}
+
+
+@bot.command(name="translate")
+async def translate_prefix(ctx: commands.Context, language: str, *, text: str | None = None):
+    source = None
+    if ctx.message.reference is not None and ctx.message.reference.message_id is not None:
+        try:
+            source = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+        except discord.HTTPException:
+            source = None
+    if source is None and not text:
+        return await ctx.reply(embed=error_notice(tr(ctx.guild.id if ctx.guild else 0, "translate.need_text")),
+                               mention_author=False)
+    source_text = source.content if source is not None else text
+    source_embed = source.embeds[0] if source is not None and source.embeds else None
+    payload = await _translation_payload(source_text or "", source_embed, _lang_code(language))
+    if payload is None:
+        return await ctx.reply(embed=error_notice(tr(ctx.guild.id if ctx.guild else 0, "translate.failed")),
+                               mention_author=False)
+    await ctx.reply(**payload, mention_author=False)
+
+
+@bot.tree.command(name="translate", description="Translate a text, or a message by its ID, into another language.")
+@app_commands.describe(language="eng, esp, por, or a code like fr", text="The text to translate",
+                       message_id="ID of a message in this channel to translate")
+async def translate(interaction: discord.Interaction, language: str, text: str | None = None, message_id: str | None = None):
+    source = None
+    if message_id:
+        try:
+            source = await interaction.channel.fetch_message(int(message_id.strip()))
+        except (ValueError, discord.HTTPException):
+            return await interaction.response.send_message(
+                embed=error_notice(tr(interaction.guild_id, "translate.not_found")), ephemeral=True
+            )
+    if source is None and not text:
+        return await interaction.response.send_message(
+            embed=error_notice(tr(interaction.guild_id, "translate.need_input")), ephemeral=True
+        )
+    await interaction.response.defer(ephemeral=source is None)
+    source_text = source.content if source is not None else text
+    source_embed = source.embeds[0] if source is not None and source.embeds else None
+    payload = await _translation_payload(source_text or "", source_embed, _lang_code(language))
+    if payload is None:
+        return await interaction.followup.send(
+            embed=error_notice(tr(interaction.guild_id, "translate.failed")), ephemeral=True
+        )
+    await interaction.followup.send(**payload, ephemeral=source is None)
 
 GIVEAWAY_LOCK = asyncio.Lock()
 JOIN_BUTTON_ID = "giveaway:join"
@@ -2070,23 +2144,72 @@ async def _collect_transcript(channel: discord.TextChannel) -> tuple[bytes, dict
         lines.append(f"[{m.created_at:%Y-%m-%d %H:%M:%S} UTC] {m.author} ({m.author.id}): {text}")
     return ("\n".join(lines) or "(no messages)").encode("utf-8"), people
 
-async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, closed_by: str) -> None:
+from html import escape as html_escape
+
+
+async def _build_html_transcript(channel: discord.TextChannel) -> bytes:
+    rows = []
+    async for m in channel.history(limit=None, oldest_first=True):
+        when = m.created_at.strftime("%Y-%m-%d %H:%M UTC")
+        body = html_escape(m.content or "").replace("\n", "<br>")
+        extras = []
+        for a in m.attachments:
+            url = html_escape(a.url, quote=True)
+            if (a.content_type or "").startswith("image/"):
+                extras.append(f'<img class="attachment" src="{url}" alt="{html_escape(a.filename)}">')
+            else:
+                extras.append(f'<a href="{url}">{html_escape(a.filename)}</a>')
+        avatar = html_escape(m.author.display_avatar.url, quote=True)
+        rows.append(
+            '<div class="msg">'
+            f'<img class="avatar" src="{avatar}" alt="">'
+            '<div class="body">'
+            f'<div class="head"><span class="name">{html_escape(m.author.display_name)}</span>'
+            f'<span class="time">{when}</span></div>'
+            f'<div class="text">{body}</div>'
+            + "".join(extras) +
+            '</div></div>'
+        )
+    title = html_escape(channel.name)
+    page = (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        f'<title>{title}</title>'
+        '<style>'
+        'body{background:#1a1c20;color:#e6e8eb;font-family:system-ui,sans-serif;margin:0;padding:24px}'
+        '.wrap{max-width:860px;margin:auto}'
+        'h1{font-size:20px;color:#9aa1ac;font-weight:600;border-bottom:1px solid #2a2e35;padding-bottom:12px}'
+        '.msg{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid #2a2e35}'
+        '.avatar{width:40px;height:40px;border-radius:50%;flex:none}'
+        '.head{display:flex;gap:10px;align-items:baseline}.name{font-weight:600}'
+        '.time{font-size:12px;color:#9aa1ac}'
+        '.text{margin-top:4px;word-break:break-word}'
+        '.attachment{max-width:360px;border-radius:8px;margin-top:6px;display:block}'
+        '</style></head><body><div class="wrap">'
+        f'<h1>{title}</h1>'
+        + ("".join(rows) or "<p>No messages.</p>") +
+        '</div></body></html>'
+    )
+    return page.encode("utf-8")
+
+
+async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, closed_by: str, reason: str | None = None) -> None:
     ticket = ticket_data["open"].pop(str(channel.id), None)
     if ticket is None:
         return
     save_tickets()
 
-    data, people = None, {}
+    data, people, html_data = None, {}, None
     if SAVE_TRANSCRIPTS:
         data, people = await _collect_transcript(channel)
+        html_data = await _build_html_transcript(channel)
     _save_closed_ticket(channel, ticket, closed_by, data, people)
     duration = fmt_seconds(now_ts() - ticket["opened_at"])
     owner_mention = f"<@{ticket['user_id']}>"
 
     def transcript_file():
-        return discord.File(io.BytesIO(data), filename=f"{channel.name}.txt") if data is not None else None
+        return discord.File(io.BytesIO(html_data), filename=f"{channel.name}.html") if html_data is not None else None
 
-    if data is not None and TRANSCRIPT_CHANNEL_ID:
+    if html_data is not None and TRANSCRIPT_CHANNEL_ID:
         tchannel = guild.get_channel(TRANSCRIPT_CHANNEL_ID)
         if tchannel is not None:
             try:
@@ -2103,14 +2226,18 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
     log.add_field(name="Type", value=ticket["type"], inline=True)
     log.add_field(name="Closed by", value=closed_by, inline=True)
     log.add_field(name="Duration", value=duration, inline=True)
+    if reason:
+        log.add_field(name="Reason", value=reason[:1024], inline=False)
     await _log(guild, log)
 
-    if DM_TRANSCRIPT_ON_CLOSE:
+    if DM_TRANSCRIPT_ON_CLOSE or reason:
         owner = await _resolve_user(ticket["user_id"])
         if owner is not None:
             dm_embed = base_embed(f"{E('warn3', '🔒')} Your ticket was closed", f"**{ticket['type']}** · open for {duration}", STEEL)
+            if reason:
+                dm_embed.add_field(name="Reason", value=reason[:1024], inline=False)
             try:
-                kwargs = {"file": transcript_file()} if data is not None else {}
+                kwargs = {"file": transcript_file()} if html_data is not None else {}
                 await owner.send(embed=dm_embed, **kwargs)
             except discord.HTTPException:
                 pass
@@ -2255,9 +2382,58 @@ class ConfirmView(discord.ui.View):
     async def _confirm(self, interaction: discord.Interaction):
         await self.on_confirm(interaction)
 
-async def _confirm_close(interaction: discord.Interaction) -> None:
-    await interaction.response.defer()
-    await _close_ticket(interaction.guild, interaction.channel, interaction.user.mention)
+class CloseReasonModal(discord.ui.Modal):
+    reason = discord.ui.TextInput(
+        label="Reason (sent to the ticket owner)",
+        style=discord.TextStyle.paragraph,
+        max_length=500,
+        required=True,
+    )
+
+    def __init__(self, gid=0):
+        super().__init__(title=tr(gid, "close.modal"), timeout=300)
+        self.reason.label = tr(gid, "close.reason_label")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await _close_ticket(interaction.guild, interaction.channel, interaction.user.mention,
+                            reason=str(self.reason.value).strip())
+
+
+class CloseChoiceView(discord.ui.View):
+    def __init__(self, gid=0):
+        super().__init__(timeout=120)
+        self.gid = gid
+        self.children[0].label = tr(gid, "close.now")
+        self.children[1].label = tr(gid, "close.with_reason")
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, emoji="🔒")
+    async def close_now(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await _close_ticket(interaction.guild, interaction.channel, interaction.user.mention)
+
+    @discord.ui.button(label="Close with reason", style=discord.ButtonStyle.secondary, emoji="📝")
+    async def close_with_reason(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CloseReasonModal(self.gid))
+
+
+class CloseConfirmView(discord.ui.View):
+    def __init__(self, gid=0):
+        super().__init__(timeout=60)
+        self.gid = gid
+        self.children[0].label = tr(gid, "close.yes")
+        self.children[1].label = tr(gid, "close.no")
+
+    @discord.ui.button(label="Yes", style=discord.ButtonStyle.danger)
+    async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=notice(tr(self.gid, "close.choose")), view=CloseChoiceView(self.gid)
+        )
+
+    @discord.ui.button(label="No", style=discord.ButtonStyle.secondary)
+    async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=notice(tr(self.gid, "close.cancelled")), view=None)
+
 
 async def _request_close(interaction: discord.Interaction) -> None:
     ticket = ticket_data["open"].get(str(interaction.channel_id))
@@ -2268,8 +2444,8 @@ async def _request_close(interaction: discord.Interaction) -> None:
             embed=error_notice("Only the ticket owner or staff can close this ticket."), ephemeral=True
         )
     await interaction.response.send_message(
-        embed=notice("Are you sure you want to close this ticket?"),
-        view=ConfirmView(_confirm_close, "Close ticket"),
+        embed=notice(tr(interaction.guild_id, "close.confirm")),
+        view=CloseConfirmView(interaction.guild_id),
         ephemeral=True,
     )
 
@@ -2632,16 +2808,17 @@ def save_goodbyes() -> None:
 
 
 def build_goodbye_layout(member: discord.Member) -> discord.ui.LayoutView:
+    gid = member.guild.id
     head = discord.ui.Section(
-        discord.ui.TextDisplay(f"# {E('GE_member', '👋')} Goodbye, {member.display_name}"),
+        discord.ui.TextDisplay(f"# {E('GE_member', '👋')} {tr(gid, 'goodbye.title', name=member.display_name)}"),
         accessory=discord.ui.Thumbnail(member.display_avatar.url),
     )
     container = discord.ui.Container(
         head,
         discord.ui.Separator(),
-        discord.ui.TextDisplay(f"{member.display_name} left **{WELCOME_SERVER_NAME}**.\n«We hope to see you again soon.»"),
+        discord.ui.TextDisplay(tr(gid, "goodbye.body", name=member.display_name, server=server_name(member.guild))),
         discord.ui.Separator(),
-        discord.ui.TextDisplay(f"-# {E('GE_member', '👤')} Members now: {member.guild.member_count}"),
+        discord.ui.TextDisplay(f"-# {E('GE_member', '👤')} {tr(gid, 'goodbye.members', n=member.guild.member_count)}"),
         accent_colour=STEEL,
     )
     view = discord.ui.LayoutView(timeout=None)
@@ -2669,7 +2846,7 @@ async def despedidas_setup(interaction: discord.Interaction, channel: discord.Te
     goodbye_config[str(interaction.guild_id)] = channel.id
     save_goodbyes()
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} Goodbye messages will be sent to {channel.mention}."), ephemeral=True
+        embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'goodbye.set', channel=channel.mention)}"), ephemeral=True
     )
 
 
@@ -2680,11 +2857,279 @@ async def despedidas_setup(interaction: discord.Interaction, channel: discord.Te
 async def despedidas_off(interaction: discord.Interaction):
     goodbye_config.pop(str(interaction.guild_id), None)
     save_goodbyes()
-    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Goodbye messages are off."), ephemeral=True)
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'goodbye.off')}"), ephemeral=True
+    )
 
 
 bot.add_listener(_send_goodbye, "on_member_remove")
 load_goodbyes()
+
+LANGUAGES_FILE = DATA_DIR / "languages.json"
+guild_langs: dict[str, str] = {}
+
+
+def load_languages() -> None:
+    global guild_langs
+    try:
+        guild_langs = json.loads(LANGUAGES_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        guild_langs = {}
+
+
+def save_languages() -> None:
+    LANGUAGES_FILE.write_text(json.dumps(guild_langs, indent=2), encoding="utf-8")
+
+
+STRINGS = {
+    "en": {
+        "anime.hug.text": "{a} hugs {b}",
+        "anime.hug.solo": "{a} hugs themselves",
+        "anime.hug.back": "{a} hugs {b} back",
+        "anime.hug.noun": "hugs",
+        "anime.kiss.text": "{a} kisses {b}",
+        "anime.kiss.solo": "{a} blows a kiss",
+        "anime.kiss.back": "{a} kisses {b} back",
+        "anime.kiss.noun": "kisses",
+        "anime.punch.text": "{a} punches {b}",
+        "anime.punch.solo": "{a} punches themselves",
+        "anime.punch.back": "{a} punches {b} back",
+        "anime.punch.noun": "punches",
+        "anime.cry.text": "{a} is crying because of {b}",
+        "anime.cry.solo": "{a} is crying",
+        "anime.sleep.text": "{a} is sleeping next to {b}",
+        "anime.sleep.solo": "{a} went to sleep",
+        "anime.banana.text": "{a} gives {b} a banana",
+        "anime.banana.solo": "{a} enjoys their banana",
+        "anime.banana.measure": "{a} measures their banana: **{cm} cm** 🍌",
+        "anime.banana.measure_for": "{a} measures {b}'s banana: **{cm} cm** 🍌",
+        "anime.note": "{a} and {b} have **{n}** {noun}",
+        "anime.return": "Return",
+        "anime.footer": "{bot} · Anime reactions",
+        "anime.only_receiver": "Only the person who received it can give it back.",
+        "afk.now": "You are now AFK",
+        "afk.reason_default": "AFK",
+        "afk.welcome_title": "Welcome back",
+        "afk.welcome": "Welcome back {a}! You were AFK for **{time}**.",
+        "afk.mentions": "You were mentioned **{n}** time(s).",
+        "afk.jump": "Jump to message",
+        "afk.is_afk": "{name} is AFK",
+        "afk.since": "Since",
+        "bot.hi": "Hi {name}!",
+        "bot.intro": "I'm the protection bot for **{server}**.\nMy prefix is `!`. Use `/help` or `!help` to see my commands.",
+        "invites.new": "New invite",
+        "invites.message": "{who} invited {member} and has **{total}** invites",
+        "invites.unknown": "**Unknown**",
+        "invites.set": "Invite messages will be sent to {channel}.",
+        "invites.off": "Invite messages are off.",
+        "goodbye.title": "Goodbye, {name}",
+        "goodbye.body": "{name} left **{server}**.\n«We hope to see you again soon.»",
+        "goodbye.members": "Members now: {n}",
+        "goodbye.set": "Goodbye messages will be sent to {channel}.",
+        "goodbye.off": "Goodbye messages are off.",
+        "translate.need_text": "Reply to a message, or write the text after the language.",
+        "translate.failed": "Could not translate. Try `eng`, `esp`, `por` or a code like `fr`.",
+        "translate.not_found": "I couldn't find that message in this channel.",
+        "translate.need_input": "Write a text or give a message ID.",
+        "translate.footer": "Translated to {lang}",
+        "close.confirm": "Are you sure you want to close this ticket?",
+        "close.choose": "Choose how to close this ticket.",
+        "close.cancelled": "Cancelled. This ticket stays open.",
+        "close.yes": "Yes",
+        "close.no": "No",
+        "close.now": "Close",
+        "close.with_reason": "Close with reason",
+        "close.modal": "Close ticket",
+        "close.reason_label": "Reason (sent to the ticket owner)",
+        "idioma.set": "Language set to **{lang}**.",
+    },
+    "es": {
+        "anime.hug.text": "{a} abraza a {b}",
+        "anime.hug.solo": "{a} se abraza a sí mismo",
+        "anime.hug.back": "{a} devuelve el abrazo a {b}",
+        "anime.hug.noun": "abrazos",
+        "anime.kiss.text": "{a} le da un beso a {b}",
+        "anime.kiss.solo": "{a} se manda un beso",
+        "anime.kiss.back": "{a} le devuelve el beso a {b}",
+        "anime.kiss.noun": "besos",
+        "anime.punch.text": "{a} le pega a {b}",
+        "anime.punch.solo": "{a} se pega solo",
+        "anime.punch.back": "{a} le devuelve el golpe a {b}",
+        "anime.punch.noun": "golpes",
+        "anime.cry.text": "{a} está llorando por culpa de {b}",
+        "anime.cry.solo": "{a} está llorando",
+        "anime.sleep.text": "{a} duerme junto a {b}",
+        "anime.sleep.solo": "{a} se fue a dormir",
+        "anime.banana.text": "{a} le regala una banana a {b}",
+        "anime.banana.solo": "{a} disfruta su banana",
+        "anime.banana.measure": "{a} mide su banana: **{cm} cm** 🍌",
+        "anime.banana.measure_for": "{a} mide la banana de {b}: **{cm} cm** 🍌",
+        "anime.note": "{a} y {b} tienen **{n}** {noun}",
+        "anime.return": "Devolver",
+        "anime.footer": "{bot} · Reacciones anime",
+        "anime.only_receiver": "Solo la persona que lo recibió puede devolverlo.",
+        "afk.now": "Ahora estás AFK",
+        "afk.reason_default": "AFK",
+        "afk.welcome_title": "Bienvenido de vuelta",
+        "afk.welcome": "¡Bienvenido de vuelta {a}! Estuviste AFK por **{time}**.",
+        "afk.mentions": "Te mencionaron **{n}** vez(ces).",
+        "afk.jump": "Ir al mensaje",
+        "afk.is_afk": "{name} está AFK",
+        "afk.since": "Desde",
+        "bot.hi": "¡Hola {name}!",
+        "bot.intro": "Soy el bot de protección de **{server}**.\nMi prefijo es `!`. Usa `/help` o `!help` para ver mis comandos.",
+        "invites.new": "Nueva invitación",
+        "invites.message": "{who} invitó a {member} y tiene **{total}** invitaciones",
+        "invites.unknown": "**Desconocido**",
+        "invites.set": "Los mensajes de invitación se enviarán a {channel}.",
+        "invites.off": "Los mensajes de invitación están apagados.",
+        "goodbye.title": "Adiós, {name}",
+        "goodbye.body": "{name} salió de **{server}**.\n«Esperamos verte pronto.»",
+        "goodbye.members": "Miembros ahora: {n}",
+        "goodbye.set": "Los mensajes de despedida se enviarán a {channel}.",
+        "goodbye.off": "Los mensajes de despedida están apagados.",
+        "translate.need_text": "Responde a un mensaje o escribe el texto después del idioma.",
+        "translate.failed": "No pude traducir. Prueba `eng`, `esp`, `por` o un código como `fr`.",
+        "translate.not_found": "No encontré ese mensaje en este canal.",
+        "translate.need_input": "Escribe un texto o da el ID de un mensaje.",
+        "translate.footer": "Traducido a {lang}",
+        "close.confirm": "¿Seguro que quieres cerrar este ticket?",
+        "close.choose": "Elige cómo cerrar este ticket.",
+        "close.cancelled": "Cancelado. Este ticket sigue abierto.",
+        "close.yes": "Sí",
+        "close.no": "No",
+        "close.now": "Cerrar",
+        "close.with_reason": "Cerrar con razón",
+        "close.modal": "Cerrar ticket",
+        "close.reason_label": "Razón (se envía al dueño del ticket)",
+        "idioma.set": "Idioma cambiado a **{lang}**.",
+    },
+}
+
+
+def tr(gid, key: str, **kwargs) -> str:
+    lang = guild_langs.get(str(gid), "en")
+    text = STRINGS.get(lang, {}).get(key) or STRINGS["en"].get(key, key)
+    return text.format(**kwargs) if kwargs else text
+
+
+@bot.tree.command(name="idioma", description="Change the language the bot uses on this server.")
+@app_commands.describe(language="Language for all bot messages")
+@app_commands.choices(language=[
+    app_commands.Choice(name="English", value="en"),
+    app_commands.Choice(name="Español", value="es"),
+])
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def idioma(interaction: discord.Interaction, language: app_commands.Choice[str]):
+    guild_langs[str(interaction.guild_id)] = language.value
+    save_languages()
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'idioma.set', lang=language.name)}"), ephemeral=True
+    )
+
+
+load_languages()
+
+SERVER_NAMES_FILE = DATA_DIR / "server_names.json"
+server_names: dict[str, str] = {}
+
+
+def load_server_names() -> None:
+    global server_names
+    try:
+        server_names = json.loads(SERVER_NAMES_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        server_names = {}
+
+
+def save_server_names() -> None:
+    SERVER_NAMES_FILE.write_text(json.dumps(server_names, indent=2), encoding="utf-8")
+
+
+def server_name(guild: discord.Guild) -> str:
+    return server_names.get(str(guild.id)) or guild.name
+
+
+@bot.tree.command(name="servername", description="Set the name the bot uses for this server in its messages.")
+@app_commands.describe(name="Name to show, up to 60 characters")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def servername(interaction: discord.Interaction, name: app_commands.Range[str, 1, 60]):
+    server_names[str(interaction.guild_id)] = name.strip()
+    save_server_names()
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} The bot will call this server **{name.strip()}**."), ephemeral=True
+    )
+
+
+@bot.tree.command(name="servername-reset", description="Use the real Discord server name again.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def servername_reset(interaction: discord.Interaction):
+    server_names.pop(str(interaction.guild_id), None)
+    save_server_names()
+    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Server name reset."), ephemeral=True)
+
+
+def _settings_embed(title: str, rows: list[tuple[str, str]]) -> discord.Embed:
+    embed = base_embed(title, "Current settings for this server.", STEEL)
+    for name, value in rows:
+        embed.add_field(name=name, value=value[:1024], inline=False)
+    return embed
+
+
+def _channel_text(guild: discord.Guild, channel_id) -> str:
+    if not channel_id:
+        return "Off"
+    channel = guild.get_channel(int(channel_id))
+    return channel.mention if channel is not None else f"Missing channel (`{channel_id}`)"
+
+
+@bot.tree.command(name="welcomes-settings", description="Show the current welcome settings.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def welcomes_settings(interaction: discord.Interaction):
+    gid = str(interaction.guild_id)
+    channel_value = welcome_config.get(gid, DEFAULT_WELCOME_CHANNEL_ID)
+    buttons = welcome_buttons_for(interaction.guild_id)
+    button_lines = "\n".join(f"{i}. **{b['label']}** · {b['url']}" for i, b in enumerate(buttons, 1)) or "None"
+    rows = [
+        ("Channel", _channel_text(interaction.guild, channel_value)),
+        ("Buttons", button_lines),
+        ("Custom buttons", "Yes" if gid in welcome_buttons_config else "No, using defaults"),
+    ]
+    await interaction.response.send_message(embed=_settings_embed("Welcome settings", rows), ephemeral=True)
+
+
+@bot.tree.command(name="invites-settings", description="Show the current invite tracking settings.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def invites_settings(interaction: discord.Interaction):
+    gid = str(interaction.guild_id)
+    tracked = len(invites_store["counts"].get(gid, {}))
+    rows = [
+        ("Channel", _channel_text(interaction.guild, invites_store["channels"].get(gid))),
+        ("Inviters tracked", str(tracked)),
+    ]
+    await interaction.response.send_message(embed=_settings_embed("Invite settings", rows), ephemeral=True)
+
+
+@bot.tree.command(name="despedidas-settings", description="Show the current goodbye settings.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def despedidas_settings(interaction: discord.Interaction):
+    rows = [("Channel", _channel_text(interaction.guild, goodbye_config.get(str(interaction.guild_id))))]
+    await interaction.response.send_message(embed=_settings_embed("Goodbye settings", rows), ephemeral=True)
+
+
+load_server_names()
 
 AUTOROLES_FILE = DATA_DIR / "autoroles.json"
 autoroles: dict[str, int] = {}
@@ -3447,7 +3892,7 @@ def build_protection_layout(guild: discord.Guild, section: str = "overview", rul
 
     body, rows = SECTION_BUILDERS.get(section, _overview_section)(guild, cfg, rule_key)
     children = [
-        discord.ui.TextDisplay(f"### {E('synexprotect', '🛡️')} Protection Panel\n-# {guild.name} · Owner only"),
+        discord.ui.TextDisplay(f"### Protection Panel\n-# {guild.name} · Owner only"),
         discord.ui.Separator(),
         discord.ui.ActionRow(nav),
         discord.ui.Separator(),
@@ -3985,11 +4430,11 @@ async def _record_invite(member: discord.Member, inviter) -> None:
     channel = guild.get_channel(channel_id) if channel_id else None
     if channel is None:
         return
-    who = inviter.mention if inviter is not None else "**Unknown**"
-    message = f"{who} invited {member.mention} and has **{total}** invites"
+    who = inviter.mention if inviter is not None else tr(guild.id, "invites.unknown")
+    message = tr(guild.id, "invites.message", who=who, member=member.mention, total=total)
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(
-        discord.ui.TextDisplay(f"### {E(['GE_member', 'community'], '🔗')} New invite"),
+        discord.ui.TextDisplay(f"### {E(['GE_member', 'community'], '🔗')} {tr(guild.id, 'invites.new')}"),
         discord.ui.Separator(),
         discord.ui.TextDisplay(message),
         discord.ui.Separator(),
@@ -4009,28 +4454,13 @@ DANGEROUS_PERMS = (
 
 
 async def _log_bot_join(member: discord.Member) -> None:
-    guild = member.guild
-    entry = await _audit_peek(guild, discord.AuditLogAction.bot_add, member.id, max_age=60)
+    entry = await _audit_peek(member.guild, discord.AuditLogAction.bot_add, member.id, max_age=60)
     adder = entry.user if entry is not None else None
-    perms = member.guild_permissions
-    flagged = [name.replace("_", " ").title() for name in DANGEROUS_PERMS if getattr(perms, name)]
     fields = [
         ("Bot", _who(member)),
         ("Added by", _who(adder) if adder is not None else "Unknown"),
-        ("Dangerous permissions", ", ".join(flagged) if flagged else "None"),
     ]
-    if perms.administrator:
-        fields.append(("Warning", "This bot has Administrator. Keep it only if you trust it."))
-    color = 0xEF4444 if perms.administrator else STEEL
-    channel_id = invites_store["channels"].get(str(guild.id)) or modlog_cfg(guild.id)["channel"]
-    channel = guild.get_channel(channel_id) if channel_id else None
-    if channel is None:
-        return
-    try:
-        await channel.send(view=_action_card("Bot added", color, member, fields),
-                           allowed_mentions=discord.AllowedMentions.none())
-    except discord.HTTPException as exc:
-        print(f"[bots] could not post: {exc}")
+    await _send_log(member.guild, "invite_join", "Bot added", STEEL, member, fields)
 
 
 async def _on_invite_member_leave(member: discord.Member) -> None:
@@ -4054,7 +4484,7 @@ async def invites_setup(interaction: discord.Interaction, channel: discord.TextC
     invites_store["channels"][str(interaction.guild_id)] = channel.id
     save_invites()
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} Invite messages will be sent to {channel.mention}."), ephemeral=True
+        embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'invites.set', channel=channel.mention)}"), ephemeral=True
     )
 
 
@@ -4065,7 +4495,9 @@ async def invites_setup(interaction: discord.Interaction, channel: discord.TextC
 async def invites_off(interaction: discord.Interaction):
     invites_store["channels"].pop(str(interaction.guild_id), None)
     save_invites()
-    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Invite messages are off."), ephemeral=True)
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'invites.off')}"), ephemeral=True
+    )
 
 
 bot.add_listener(_on_invite_member_leave, "on_member_remove")
@@ -4101,19 +4533,14 @@ async def _log_invite_join(member: discord.Member) -> None:
 import aiohttp
 
 ANIME_ACTIONS = {
-    "hug": {"category": "hug", "emoji": "🤗", "color": STEEL, "text": "{a} hugs {b}",
-            "solo": "{a} hugs themselves", "back": "{a} hugs {b} back", "noun": "hugs"},
-    "kiss": {"category": "kiss", "emoji": "💋", "color": STEEL, "text": "{a} kisses {b}",
-             "solo": "{a} blows a kiss", "back": "{a} kisses {b} back", "noun": "kisses"},
-    "punch": {"category": "punch", "emoji": "👊", "color": STEEL, "text": "{a} punches {b}",
-              "solo": "{a} punches themselves", "back": "{a} punches {b} back", "noun": "punches"},
-    "cry": {"category": "cry", "emoji": "😭", "color": STEEL, "text": "{a} is crying because of {b}",
-            "solo": "{a} is crying", "back": None},
-    "sleep": {"category": "sleep", "emoji": "😴", "color": STEEL, "text": "{a} is sleeping next to {b}",
-              "solo": "{a} went to sleep", "back": None},
-    "banana": {"category": "happy", "emoji": "🍌", "color": STEEL, "text": "{a} gives {b} a banana",
-               "solo": "{a} enjoys their banana", "back": None},
+    "hug": {"category": "hug", "emoji": "🤗", "color": STEEL, "back": True},
+    "kiss": {"category": "kiss", "emoji": "💋", "color": STEEL, "back": True},
+    "punch": {"category": "punch", "emoji": "👊", "color": STEEL, "back": True},
+    "cry": {"category": "cry", "emoji": "😭", "color": STEEL, "back": False},
+    "sleep": {"category": "sleep", "emoji": "😴", "color": STEEL, "back": False},
+    "banana": {"category": "happy", "emoji": "🍌", "color": STEEL, "back": False},
 }
+ANIME_COUNTED = ("hug", "kiss", "punch")
 
 ANIME_STATS_FILE = DATA_DIR / "anime_stats.json"
 anime_stats: dict[str, int] = {}
@@ -4128,14 +4555,13 @@ def load_anime_stats() -> None:
 
 
 def _pair_note(gid: int, action: str, a, b) -> str | None:
-    noun = ANIME_ACTIONS[action].get("noun")
-    if not noun:
+    if action not in ANIME_COUNTED:
         return None
     low, high = sorted((a.id, b.id))
     key = f"{gid}:{action}:{low}:{high}"
     anime_stats[key] = anime_stats.get(key, 0) + 1
     ANIME_STATS_FILE.write_text(json.dumps(anime_stats, indent=2), encoding="utf-8")
-    return f"{a.mention} and {b.mention} have **{anime_stats[key]}** {noun}"
+    return tr(gid, "anime.note", a=a.mention, b=b.mention, n=anime_stats[key], noun=tr(gid, f"anime.{action}.noun"))
 
 
 load_anime_stats()
@@ -4156,9 +4582,10 @@ async def _anime_gif(category: str) -> str | None:
 
 
 class AnimeView(discord.ui.LayoutView):
-    def __init__(self, text, gif, color, *, author=None, target=None, back_text=None, category=None,
+    def __init__(self, text, gif, color, *, gid=0, author=None, target=None, back_text=None, category=None,
                  action=None, note=None):
         super().__init__(timeout=300)
+        self.gid = gid
         self.author = author
         self.target = target
         self.back_text = back_text
@@ -4171,48 +4598,165 @@ class AnimeView(discord.ui.LayoutView):
         if gif:
             children += [discord.ui.Separator(), discord.ui.MediaGallery(discord.MediaGalleryItem(gif))]
         if target is not None and back_text:
-            button = discord.ui.Button(label="Return", emoji="↩️", style=discord.ButtonStyle.secondary)
+            button = discord.ui.Button(label=tr(gid, "anime.return"), emoji="↩️", style=discord.ButtonStyle.secondary)
             button.callback = self._give_back
             children += [discord.ui.Separator(), discord.ui.ActionRow(button)]
-        children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# {BOT_NAME} · Anime reactions")]
+        children += [discord.ui.Separator(), discord.ui.TextDisplay(tr(gid, "anime.footer", bot=BOT_NAME))]
         self.add_item(discord.ui.Container(*children, accent_colour=color))
 
     async def _give_back(self, interaction: discord.Interaction):
         if interaction.user.id != self.target.id:
             return await interaction.response.send_message(
-                embed=error_notice("Only the person who received it can give it back."), ephemeral=True
+                embed=error_notice(tr(self.gid, "anime.only_receiver")), ephemeral=True
             )
         await interaction.response.defer()
         gif = await _anime_gif(self.category)
-        text = self.back_text.format(a=self.target.mention, b=self.author.mention)
-        note = _pair_note(interaction.guild_id, self.action, self.target, self.author)
+        text = tr(self.gid, f"anime.{self.action}.back", a=self.target.mention, b=self.author.mention)
+        note = _pair_note(self.gid, self.action, self.target, self.author)
         await interaction.followup.send(view=AnimeView(f"{ANIME_ACTIONS[self.action]['emoji']} {text}", gif, self.color,
-                                                       action=self.action, note=note))
+                                                       gid=self.gid, action=self.action, note=note))
 
 
-async def _send_anime(ctx: commands.Context, name: str, member: discord.Member | None) -> None:
+BANANA_IMAGE = Path(__file__).parent / "assets" / "banana.png"
+
+
+async def _send_anime(author, guild, name: str, member, send) -> None:
     cfg = ANIME_ACTIONS[name]
-    target = member if member is not None and member.id != ctx.author.id else None
-    if target is None:
-        text = cfg["solo"].format(a=ctx.author.mention)
+    target = member if member is not None and member.id != author.id else None
+    gid = guild.id if guild is not None else 0
+    file = None
+    if name == "banana":
+        centimeters = random.randint(5, 30)
+        if target is None:
+            text = tr(gid, "anime.banana.measure", a=author.mention, cm=centimeters)
+        else:
+            text = tr(gid, "anime.banana.measure_for", a=author.mention, b=target.mention, cm=centimeters)
+        gif = None
+        if BANANA_IMAGE.exists():
+            file = discord.File(BANANA_IMAGE, filename="banana.png")
+            gif = "attachment://banana.png"
+        view = AnimeView(f"{cfg['emoji']} {text}", gif, cfg["color"], gid=gid)
     else:
-        text = cfg["text"].format(a=ctx.author.mention, b=target.mention)
-    note = _pair_note(ctx.guild.id, name, ctx.author, target) if target is not None and ctx.guild else None
-    gif = await _anime_gif(cfg["category"])
-    view = AnimeView(f"{cfg['emoji']} {text}", gif, cfg["color"], author=ctx.author, target=target,
-                     back_text=cfg["back"], category=cfg["category"], action=name, note=note)
-    await ctx.send(view=view)
+        if target is None:
+            text = tr(gid, f"anime.{name}.solo", a=author.mention)
+        else:
+            text = tr(gid, f"anime.{name}.text", a=author.mention, b=target.mention)
+        note = _pair_note(gid, name, author, target) if target is not None else None
+        gif = await _anime_gif(cfg["category"])
+        back_text = tr(gid, f"anime.{name}.back") if cfg["back"] and target is not None else None
+        view = AnimeView(f"{cfg['emoji']} {text}", gif, cfg["color"], gid=gid, author=author, target=target,
+                         back_text=back_text, category=cfg["category"], action=name, note=note)
+    if file is not None:
+        await send(view=view, file=file)
+    else:
+        await send(view=view)
 
 
 def _register_anime_command(name: str) -> None:
     @bot.command(name=name)
-    @commands.guild_only()
-    async def anime_command(ctx: commands.Context, member: Optional[discord.Member] = None):
-        await _send_anime(ctx, name, member)
+    async def anime_prefix(ctx: commands.Context, member: Optional[discord.User] = None):
+        await _send_anime(ctx.author, ctx.guild, name, member, ctx.send)
+
+    @bot.tree.command(name=name, description=f"Send an anime {name} reaction.")
+    @app_commands.describe(member="Who to send it to (optional)")
+    async def anime_slash(interaction: discord.Interaction, member: Optional[discord.User] = None):
+        await interaction.response.defer()
+        await _send_anime(interaction.user, interaction.guild, name, member, interaction.followup.send)
 
 
 for _anime_name in ANIME_ACTIONS:
     _register_anime_command(_anime_name)
+
+
+AFK_STATE: dict[tuple[int, int], dict] = {}
+
+
+async def _set_afk_nick(member: discord.Member) -> None:
+    if member.display_name.startswith("[AFK] "):
+        return
+    try:
+        await member.edit(nick=f"[AFK] {member.display_name}"[:32], reason="AFK")
+    except discord.HTTPException:
+        pass
+
+
+async def _clear_afk_nick(member: discord.Member, record: dict) -> None:
+    try:
+        await member.edit(nick=record.get("nick"), reason="Back from AFK")
+    except discord.HTTPException:
+        pass
+
+
+async def _start_afk(member: discord.Member, reason: str) -> None:
+    AFK_STATE[(member.guild.id, member.id)] = {
+        "since": now_ts(), "reason": reason, "nick": member.nick, "mentions": [],
+    }
+    await _set_afk_nick(member)
+
+
+@bot.command(name="afk")
+async def afk_prefix(ctx: commands.Context, *, reason: str = "AFK"):
+    if ctx.guild is None:
+        return
+    await _start_afk(ctx.author, reason[:120])
+    await ctx.reply(embed=base_embed(f"{E('warn3', '😴')} {tr(ctx.guild.id, 'afk.now')}", reason[:120], STEEL),
+                    mention_author=False)
+
+
+@bot.tree.command(name="afk", description="Set yourself as AFK. Mentions are logged for when you return.")
+@app_commands.describe(reason="Why you are away")
+@app_commands.guild_only()
+async def afk_slash(interaction: discord.Interaction, reason: app_commands.Range[str, 1, 120] = "AFK"):
+    await _start_afk(interaction.user, reason)
+    await interaction.response.send_message(
+        embed=base_embed(f"{E('warn3', '😴')} {tr(interaction.guild_id, 'afk.now')}", reason, STEEL), ephemeral=True
+    )
+
+
+async def _afk_on_message(message: discord.Message) -> None:
+    if message.guild is None or message.author.bot:
+        return
+    gid = message.guild.id
+    record = AFK_STATE.pop((gid, message.author.id), None)
+    if record is not None:
+        await _clear_afk_nick(message.author, record)
+        away = fmt_seconds(now_ts() - record["since"])
+        lines = [tr(gid, "afk.welcome", a=message.author.mention, time=away),
+                 tr(gid, "afk.mentions", n=len(record["mentions"]))]
+        for item in record["mentions"][:10]:
+            lines.append(f"• {item['author']}: [{tr(gid, 'afk.jump')}]({item['url']})")
+        try:
+            await message.channel.send(embed=base_embed(f"😴 {tr(gid, 'afk.welcome_title')}", "\n".join(lines), STEEL),
+                                       allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            pass
+    for target in message.mentions:
+        if target.bot or target.id == message.author.id:
+            continue
+        mentioned = AFK_STATE.get((gid, target.id))
+        if mentioned is None:
+            continue
+        mentioned["mentions"] = (mentioned["mentions"] + [{"author": str(message.author), "url": message.jump_url}])[-25:]
+        try:
+            await message.channel.send(
+                embed=base_embed(f"😴 {tr(gid, 'afk.is_afk', name=target.display_name)}",
+                                 f"{mentioned['reason']}\n-# {tr(gid, 'afk.since')} <t:{mentioned['since']}:R>", STEEL),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            pass
+    if bot.user is not None and any(u.id == bot.user.id for u in message.mentions):
+        try:
+            await message.channel.send(
+                embed=base_embed(tr(gid, "bot.hi", name=message.author.display_name),
+                                 tr(gid, "bot.intro", server=server_name(message.guild)), STEEL),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            pass
+
+
+bot.add_listener(_afk_on_message, "on_message")
 
 
 def _excerpt(text: str | None, limit: int = 900) -> str:
