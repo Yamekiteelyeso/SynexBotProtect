@@ -5963,31 +5963,26 @@ def remove_marriage(gid: int, a: int, b: int) -> None:
     save_marriages()
 
 
-def _marriage_layout(text: str, gif: str | None) -> discord.ui.LayoutView:
-    view = discord.ui.LayoutView(timeout=None)
-    children = [discord.ui.TextDisplay(f"### {text}")]
+# Imagen de las propuestas. Pon aquí un link directo (.gif/.jpg/.png) para usar tu propia imagen.
+# Si queda en None, se usa una imagen aleatoria de anime de nekos.best.
+MARRY_IMAGE_URL: str | None = None
+
+
+def _marriage_embed(text: str, gif: str | None) -> discord.Embed:
+    embed = base_embed(None, text, STEEL)
     if gif:
-        children += [discord.ui.Separator(), discord.ui.MediaGallery(discord.MediaGalleryItem(gif))]
-    children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# {BOT_NAME} · v{BOT_VERSION}")]
-    view.add_item(discord.ui.Container(*children, accent_colour=0xEC4899))
-    return view
+        embed.set_image(url=gif)
+    return embed
 
 
-class MarriageProposalView(discord.ui.LayoutView):
-    def __init__(self, proposer: discord.Member, target: discord.Member, gif: str | None, text: str):
+class MarriageProposalView(discord.ui.View):
+    def __init__(self, proposer: discord.Member, target: discord.Member):
         super().__init__(timeout=300)
         self.proposer = proposer
         self.target = target
-        self.accept_button = discord.ui.Button(label="Aceptar marriage", emoji="💍", style=discord.ButtonStyle.success)
-        self.accept_button.callback = self._accept
-        children = [discord.ui.TextDisplay(f"### 💍 {text}")]
-        if gif:
-            children += [discord.ui.Separator(), discord.ui.MediaGallery(discord.MediaGalleryItem(gif))]
-        children += [discord.ui.Separator(), discord.ui.ActionRow(self.accept_button),
-                     discord.ui.Separator(), discord.ui.TextDisplay(f"-# {BOT_NAME} · v{BOT_VERSION}")]
-        self.add_item(discord.ui.Container(*children, accent_colour=0xEC4899))
 
-    async def _accept(self, interaction: discord.Interaction):
+    @discord.ui.button(label="Accept", emoji="💍", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.target.id:
             return await interaction.response.send_message(
                 embed=error_notice(f"Only {self.target.display_name} can accept this proposal."), ephemeral=True)
@@ -5999,13 +5994,81 @@ class MarriageProposalView(discord.ui.LayoutView):
         add_marriage(gid, self.proposer.id, self.target.id)
         gif = await _anime_gif("kiss")
         text = random.choice(MARRIAGE_ACCEPT_LINES).format(a=self.proposer.mention, b=self.target.mention)
-        await interaction.response.edit_message(view=_marriage_layout(f"💞 {text}", gif))
+        await interaction.response.edit_message(embed=_marriage_embed(text, gif), view=None)
         self.stop()
 
 
+def _kw(**kwargs) -> dict:
+    return {k: v for k, v in kwargs.items() if v is not None}
+
+
+def _prefix_responder(ctx: commands.Context):
+    async def respond(embed=None, view=None, ephemeral=False, allowed_mentions=None):
+        return await ctx.reply(mention_author=False, **_kw(embed=embed, view=view, allowed_mentions=allowed_mentions))
+    return respond
+
+
+def _slash_responder(interaction: discord.Interaction):
+    async def respond(embed=None, view=None, ephemeral=False, allowed_mentions=None):
+        kwargs = _kw(embed=embed, view=view, ephemeral=ephemeral, allowed_mentions=allowed_mentions)
+        if not interaction.response.is_done():
+            return await interaction.response.send_message(**kwargs)
+        return await interaction.followup.send(**kwargs)
+    return respond
+
+
+async def _marry_flow(author: discord.Member, member: discord.Member, respond) -> None:
+    gid = author.guild.id
+    if member.bot or member.id == author.id:
+        return await respond(embed=error_notice("You can't marry that user."), ephemeral=True)
+    if str(member.id) in partners_of(gid, author.id):
+        return await respond(embed=error_notice(f"You are already married to {member.display_name}."), ephemeral=True)
+    if len(partners_of(gid, author.id)) >= MAX_MARRIAGES:
+        return await respond(embed=error_notice(f"You already have {MAX_MARRIAGES} marriages. Divorce one first."),
+                             ephemeral=True)
+    if len(partners_of(gid, member.id)) >= MAX_MARRIAGES:
+        return await respond(embed=error_notice(f"{member.display_name} already has {MAX_MARRIAGES} marriages."),
+                             ephemeral=True)
+    gif = MARRY_IMAGE_URL or await _anime_gif("handhold")
+    text = random.choice(MARRIAGE_PROPOSE_LINES).format(a=author.mention, b=member.mention)
+    await respond(embed=_marriage_embed(text, gif), view=MarriageProposalView(author, member))
+
+
+async def _divorce_flow(author: discord.Member, member: discord.Member, respond) -> None:
+    gid = author.guild.id
+    if str(member.id) not in partners_of(gid, author.id):
+        return await respond(embed=error_notice(f"You are not married to {member.display_name}."), ephemeral=True)
+    remove_marriage(gid, author.id, member.id)
+    await respond(embed=base_embed("💔 Divorce", f"{author.mention} and {member.mention} are no longer married.", STEEL),
+                  allowed_mentions=discord.AllowedMentions.none())
+
+
+async def _list_flow(guild: discord.Guild, respond, member: discord.Member | None = None) -> None:
+    seen, lines = set(), []
+    now = now_ts()
+    focus = str(member.id) if member is not None else None
+    for a, partners in marriages.get(str(guild.id), {}).items():
+        if focus is not None and a != focus:
+            continue
+        for b, since in partners.items():
+            key = frozenset((a, b))
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(f"💍 <@{a}> & <@{b}> · married for **{fmt_seconds(max(0, now - since))}**")
+    if member is not None:
+        title = f"💍 Marriages · {member.display_name}"
+        empty = f"{member.display_name} has no marriages."
+    else:
+        title, empty = "💍 Marriages", "No marriages yet."
+    body = "\n".join(lines) or empty
+    await respond(embed=base_embed(title, body, STEEL), allowed_mentions=discord.AllowedMentions.none())
+
+
+# Prefijo: !marriage marry / divorcie / list
 @bot.group(name="marriage", invoke_without_command=True)
 async def marriage(ctx: commands.Context):
-    await ctx.reply(embed=notice("Use `!marriage marry @user`, `!marriage divorcie @user` or `!marriage list`."),
+    await ctx.reply(embed=notice("Use `!marriage marry @user`, `!marriage divorcie @user` or `!marriage list [@user]`."),
                     mention_author=False)
 
 
@@ -6013,52 +6076,46 @@ async def marriage(ctx: commands.Context):
 async def marriage_marry(ctx: commands.Context, member: discord.Member):
     if ctx.guild is None:
         return
-    gid = ctx.guild.id
-    if member.bot or member.id == ctx.author.id:
-        return await ctx.reply(embed=error_notice("You can't marry that user."), mention_author=False)
-    if str(member.id) in partners_of(gid, ctx.author.id):
-        return await ctx.reply(embed=error_notice(f"You are already married to {member.display_name}."),
-                               mention_author=False)
-    if len(partners_of(gid, ctx.author.id)) >= MAX_MARRIAGES:
-        return await ctx.reply(embed=error_notice(f"You already have {MAX_MARRIAGES} marriages. Divorce one first."),
-                               mention_author=False)
-    if len(partners_of(gid, member.id)) >= MAX_MARRIAGES:
-        return await ctx.reply(embed=error_notice(f"{member.display_name} already has {MAX_MARRIAGES} marriages."),
-                               mention_author=False)
-    gif = await _anime_gif("hug")
-    text = random.choice(MARRIAGE_PROPOSE_LINES).format(a=ctx.author.mention, b=member.mention)
-    await ctx.send(view=MarriageProposalView(ctx.author, member, gif, text))
+    await _marry_flow(ctx.author, member, _prefix_responder(ctx))
 
 
 @marriage.command(name="divorcie", aliases=["divorce"])
 async def marriage_divorce(ctx: commands.Context, member: discord.Member):
     if ctx.guild is None:
         return
-    if str(member.id) not in partners_of(ctx.guild.id, ctx.author.id):
-        return await ctx.reply(embed=error_notice(f"You are not married to {member.display_name}."),
-                               mention_author=False)
-    remove_marriage(ctx.guild.id, ctx.author.id, member.id)
-    await ctx.reply(embed=base_embed("💔 Divorce", f"{ctx.author.mention} and {member.mention} are no longer married.", STEEL),
-                    mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+    await _divorce_flow(ctx.author, member, _prefix_responder(ctx))
 
 
 @marriage.command(name="list")
-async def marriage_list(ctx: commands.Context):
+async def marriage_list(ctx: commands.Context, member: discord.Member | None = None):
     if ctx.guild is None:
         return
-    seen, lines = set(), []
-    now = now_ts()
-    for a, partners in marriages.get(str(ctx.guild.id), {}).items():
-        for b, since in partners.items():
-            key = frozenset((a, b))
-            if key in seen:
-                continue
-            seen.add(key)
-            lines.append(f"💍 <@{a}> & <@{b}> · married for **{fmt_seconds(max(0, now - since))}**")
-    body = "\n".join(lines) or "No marriages yet."
-    await ctx.reply(embed=base_embed("💍 Marriages", body, STEEL), mention_author=False,
-                    allowed_mentions=discord.AllowedMentions.none())
+    await _list_flow(ctx.guild, _prefix_responder(ctx), member)
 
+
+# Slash: /marriage marry / divorcie / list
+marriage_slash = app_commands.Group(name="marriage", description="Marriage commands", guild_only=True)
+
+
+@marriage_slash.command(name="marry", description="Propose marriage to a member.")
+@app_commands.describe(member="The member you want to marry")
+async def marriage_marry_slash(interaction: discord.Interaction, member: discord.Member):
+    await _marry_flow(interaction.user, member, _slash_responder(interaction))
+
+
+@marriage_slash.command(name="divorcie", description="End a marriage with a member.")
+@app_commands.describe(member="The member you want to divorce")
+async def marriage_divorce_slash(interaction: discord.Interaction, member: discord.Member):
+    await _divorce_flow(interaction.user, member, _slash_responder(interaction))
+
+
+@marriage_slash.command(name="list", description="Show marriages in this server, or of one member.")
+@app_commands.describe(member="Only show this member's marriages (optional)")
+async def marriage_list_slash(interaction: discord.Interaction, member: discord.Member | None = None):
+    await _list_flow(interaction.guild, _slash_responder(interaction), member)
+
+
+bot.tree.add_command(marriage_slash)
 
 load_marriages()
 
