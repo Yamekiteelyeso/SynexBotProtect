@@ -2973,9 +2973,9 @@ STRINGS = {
         "afk.welcome": "Welcome back {a}! You were AFK for **{time}**.",
         "afk.mentions": "You were mentioned **{n}** time(s).",
         "afk.jump": "Jump to message",
-        "afk.is_afk": "{name} is AFK",
+        "afk.is_afk": "**{name}** is AFK",
         "afk.since": "Since",
-        "afk.ago": "AFK for {time}",
+        "afk.ago": "for {time}",
         "bot.hi": "Hi {name}!",
         "bot.intro": "I'm the protection bot for **{server}**.\nMy prefix is `!`. Use `/help` or `!help` to see my commands.",
         "invites.new": "New invite",
@@ -3035,9 +3035,9 @@ STRINGS = {
         "afk.welcome": "¡Bienvenido de vuelta {a}! Estuviste AFK por **{time}**.",
         "afk.mentions": "Te mencionaron **{n}** vez(ces).",
         "afk.jump": "Ir al mensaje",
-        "afk.is_afk": "{name} está AFK",
+        "afk.is_afk": "**{name}** está AFK",
         "afk.since": "Desde",
-        "afk.ago": "AFK desde hace {time}",
+        "afk.ago": "desde hace {time}",
         "bot.hi": "¡Hola {name}!",
         "bot.intro": "Soy el bot de protección de **{server}**.\nMi prefijo es `!`. Usa `/help` o `!help` para ver mis comandos.",
         "invites.new": "Nueva invitación",
@@ -4720,9 +4720,9 @@ async def afk_prefix(ctx: commands.Context, *, reason: str = "AFK"):
     if ctx.guild is None:
         return
     renamed = await _start_afk(ctx.author, reason[:120])
-    note = "" if renamed else "\n-# I couldn't add [AFK] to your nickname: check that my role is above yours and that I have Manage Nicknames."
-    await ctx.reply(embed=base_embed(f"{E('warn3', '😴')} {tr(ctx.guild.id, 'afk.now')}", reason[:120] + note, STEEL),
-                    mention_author=False)
+    if not renamed:
+        await ctx.reply("No pude poner [AFK] en tu apodo. Revisa que mi rol esté por encima del tuyo y que tenga el permiso Gestionar apodos.",
+                        mention_author=False)
 
 
 @bot.tree.command(name="afk", description="Set yourself as AFK. Mentions are logged for when you return.")
@@ -4730,10 +4730,8 @@ async def afk_prefix(ctx: commands.Context, *, reason: str = "AFK"):
 @app_commands.guild_only()
 async def afk_slash(interaction: discord.Interaction, reason: app_commands.Range[str, 1, 120] = "AFK"):
     renamed = await _start_afk(interaction.user, reason)
-    note = "" if renamed else "\n-# I couldn't add [AFK] to your nickname: check that my role is above yours and that I have Manage Nicknames."
-    await interaction.response.send_message(
-        embed=base_embed(f"{E('warn3', '😴')} {tr(interaction.guild_id, 'afk.now')}", reason + note, STEEL), ephemeral=True
-    )
+    msg = "AFK activado." if renamed else "No pude poner [AFK] en tu apodo. Revisa que mi rol esté por encima del tuyo y que tenga el permiso Gestionar apodos."
+    await interaction.response.send_message(msg, ephemeral=True)
 
 
 async def _afk_on_message(message: discord.Message) -> None:
@@ -4767,9 +4765,9 @@ async def _afk_on_message(message: discord.Message) -> None:
             continue
         mentioned["mentions"] = (mentioned["mentions"] + [{"author": str(message.author), "url": message.jump_url}])[-25:]
         try:
+            away = fmt_seconds(max(0, now_ts() - mentioned["since"]))
             await message.channel.send(
-                embed=base_embed(f"😴 {tr(gid, 'afk.is_afk', name=target.display_name)}",
-                                 f"{mentioned['reason']}\n-# {tr(gid, 'afk.ago', time=fmt_seconds(max(0, now_ts() - mentioned['since'])))}", STEEL),
+                f"{tr(gid, 'afk.is_afk', name=target.display_name)} {tr(gid, 'afk.ago', time=away)}.",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException:
