@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.12.0"
+BOT_VERSION = "1.12.1"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -240,10 +240,20 @@ def server_overview_text(guild: discord.Guild) -> str:
     return "\n\n".join(lines)
 
 
-def server_roles_text(guild: discord.Guild) -> str:
+SERVER_ROLES_PER_PAGE = 10
+
+
+def server_roles_page(guild: discord.Guild, page: int) -> tuple[str, int, int]:
+    """Roles from highest to lowest, 10 per page. Returns (text, page, total_pages)."""
     roles = [r for r in reversed(guild.roles) if not r.is_default()]
-    body = " ".join(r.mention for r in roles) or "None"
-    return f"**Roles · {len(roles)}**\n{_cap(body)}"
+    pages = max(1, -(-len(roles) // SERVER_ROLES_PER_PAGE))
+    page = min(max(page, 0), pages - 1)
+    chunk = roles[page * SERVER_ROLES_PER_PAGE:(page + 1) * SERVER_ROLES_PER_PAGE]
+    body = "  ".join(r.mention for r in chunk) or "None"
+    text = f"**Roles · {len(roles)}**\n{body}"
+    if pages > 1:
+        text += f"\n-# Page {page + 1} of {pages}"
+    return text, page, pages
 
 
 def server_emojis_text(guild: discord.Guild) -> str:
@@ -251,15 +261,20 @@ def server_emojis_text(guild: discord.Guild) -> str:
     return f"**Emojis · {len(guild.emojis)}**\n{_cap(body)}"
 
 
-def build_server_layout(guild: discord.Guild, section: str = "server") -> discord.ui.LayoutView:
+def build_server_layout(guild: discord.Guild, section: str = "server", page: int = 0) -> discord.ui.LayoutView:
     logo = fixed_emoji("synexprotect", 1568001429258641661)
-    body = {
-        "server": server_overview_text,
-        "roles": server_roles_text,
-        "emojis": server_emojis_text,
-    }.get(section, server_overview_text)(guild)
+    roles_page, pages = 0, 1
+    if section == "roles":
+        body, roles_page, pages = server_roles_page(guild, page)
+    else:
+        body = {
+            "server": server_overview_text,
+            "emojis": server_emojis_text,
+        }.get(section, server_overview_text)(guild)
 
-    title = discord.ui.TextDisplay(f"### {logo} Server Information")
+    title = discord.ui.TextDisplay(
+        f"### {logo} Server Information\n-# {guild.name} · {guild.member_count:,} members"
+    )
     head = (discord.ui.Section(title, accessory=discord.ui.Thumbnail(guild.icon.url))
             if guild.icon else title)
 
@@ -278,17 +293,33 @@ def build_server_layout(guild: discord.Guild, section: str = "server") -> discor
 
     select.callback = on_pick
 
-    container = discord.ui.Container(
+    children = [
         head,
         discord.ui.Separator(),
         discord.ui.TextDisplay(body),
         discord.ui.Separator(),
         discord.ui.ActionRow(select),
-        discord.ui.TextDisplay("-# Synex Protect • Server Information"),
-        accent_colour=CHARCOAL,
-    )
+    ]
+
+    if section == "roles" and pages > 1:
+        prev_btn = discord.ui.Button(label="Previous", emoji="◀️", style=discord.ButtonStyle.secondary,
+                                     disabled=roles_page == 0)
+        next_btn = discord.ui.Button(label="Next", emoji="▶️", style=discord.ButtonStyle.secondary,
+                                     disabled=roles_page >= pages - 1)
+
+        async def go_prev(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=build_server_layout(guild, "roles", roles_page - 1))
+
+        async def go_next(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=build_server_layout(guild, "roles", roles_page + 1))
+
+        prev_btn.callback = go_prev
+        next_btn.callback = go_next
+        children.append(discord.ui.ActionRow(prev_btn, next_btn))
+
+    children.append(discord.ui.TextDisplay("-# Synex Protect • Server Information"))
     view = discord.ui.LayoutView(timeout=600)
-    view.add_item(container)
+    view.add_item(discord.ui.Container(*children, accent_colour=CHARCOAL))
     return view
 
 
@@ -2455,36 +2486,4 @@ async def autorol(interaction: discord.Interaction, role: discord.Role):
 async def autorol_off(interaction: discord.Interaction):
     autoroles.pop(str(interaction.guild_id), None)
     save_autoroles()
-    await interaction.response.send_message(embed=notice("Auto role is off."), ephemeral=True)
-
-
-@bot.tree.command(name="welcomes-on", description="Turn welcomes back on in the default welcome channel.")
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.guild_only()
-async def welcomes_on(interaction: discord.Interaction):
-    welcome_config.pop(str(interaction.guild_id), None)  # back to the default channel
-    save_welcomes()
-    channel = interaction.guild.get_channel(DEFAULT_WELCOME_CHANNEL_ID)
-    where = channel.mention if channel else f"`{DEFAULT_WELCOME_CHANNEL_ID}`"
-    await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} Welcomes are on in {where}."), ephemeral=True
-    )
-
-
-@bot.tree.command(name="welcomes-off", description="Stop sending new member welcomes.")
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.guild_only()
-async def welcomes_off(interaction: discord.Interaction):
-    welcome_config[str(interaction.guild_id)] = 0
-    save_welcomes()
-    await interaction.response.send_message(embed=notice("Welcomes are off."), ephemeral=True)
-
-
-# ---------------------------------------------------------------- run
-
-if __name__ == "__main__":
-    if not TOKEN:
-        raise SystemExit("DISCORD_TOKEN is not set. Add it to your .env file.")
-    bot.run(TOKEN)
+    await interaction.response.send_message(em
