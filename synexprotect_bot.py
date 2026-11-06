@@ -34,7 +34,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.11.3"
+BOT_VERSION = "1.11.4"
 
 # Palette: black / charcoal / slate / steel / silver
 INK = 0x0B0C0E
@@ -204,23 +204,27 @@ def build_serverinfo_embed(guild: discord.Guild) -> discord.Embed:
     roles = [r for r in guild.roles if not r.is_default()]
     humans = sum(1 for m in guild.members if not m.bot)
     bots = sum(1 for m in guild.members if m.bot)
+    text_count, voice_count = len(guild.text_channels), len(guild.voice_channels)
+    boost_emoji = E("nitroboosterrmz1", "🚀")
 
-    embed = base_embed(guild.name, guild.description or "Server overview", CHARCOAL)
+    lines = [
+        f"{E('Crown', '👑')} **Owner**\n{guild.owner.mention if guild.owner else 'Unknown'}",
+        f"{E('Boosts', '💎')} **Server Boosts**\nLevel {guild.premium_tier} • {guild.premium_subscription_count} Boosts {boost_emoji}",
+        f"{E('community', '👥')} **Members**\n{guild.member_count:,} Total • {humans:,} humans • {bots:,} bots",
+        f"{E('white_hashtag', '#️⃣')} **Channels**\n{text_count} Text • {voice_count} Voice",
+        f"{E('estrella_vacia', '⭐')} **Roles**\n{len(roles)} Total",
+        f"🕓 **Created**\n{discord.utils.format_dt(guild.created_at, 'D')} • {discord.utils.format_dt(guild.created_at, 'R')}",
+        f"{E('synexprotect', '🛡️')} **Server ID**\n`{guild.id}`",
+    ]
+    embed = discord.Embed(
+        title=f"{E('synexprotect', '🛡️')} Server Information",
+        description="\n\n".join(lines),
+        color=CHARCOAL,
+        timestamp=datetime.now(timezone.utc),
+    )
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
-
-    embed.add_field(name="Owner", value=guild.owner.mention if guild.owner else "Unknown", inline=True)
-    embed.add_field(name="Boost", value=f"Level {guild.premium_tier} · {guild.premium_subscription_count} boosts", inline=True)
-    embed.add_field(name="Verification", value=str(guild.verification_level).title(), inline=True)
-    embed.add_field(name="Members", value=f"**{guild.member_count:,}** total\n{humans:,} humans · {bots:,} bots", inline=True)
-    embed.add_field(name="Channels", value=f"{len(guild.text_channels)} text · {len(guild.voice_channels)} voice", inline=True)
-    embed.add_field(name="Roles", value=str(len(roles)), inline=True)
-    embed.add_field(
-        name="Created",
-        value=f"{discord.utils.format_dt(guild.created_at, 'D')} · {discord.utils.format_dt(guild.created_at, 'R')}",
-        inline=False,
-    )
-    embed.add_field(name="Server ID", value=f"`{guild.id}`", inline=False)
+    embed.set_footer(text="Synex Protect • Server Information")
     return embed
 
 
