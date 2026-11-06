@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.18.0"
+BOT_VERSION = "1.19.0"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -159,13 +159,27 @@ def progress_bar(percent: float, size: int = 12) -> str:
 def now_ts() -> int:
     return int(datetime.now(timezone.utc).timestamp())
 
-def build_ping_embed() -> discord.Embed:
+def build_ping_layout() -> discord.ui.LayoutView:
     ms = round(bot.latency * 1000)
-    status = "Excellent" if ms < 100 else "Good" if ms < 200 else "Degraded"
-    embed = base_embed(f"{E(['ping', 'latency'], '⚡')} Latency", color=STEEL)
-    embed.add_field(name="Response time", value=f"`{ms} ms`", inline=True)
-    embed.add_field(name="Status", value=status, inline=True)
-    return embed
+    if ms < 100:
+        status, color = f"{E(['true', 'check'], '✅')} Excellent", 0x22C55E
+    elif ms < 200:
+        status, color = f"{E(['warn3', 'warn'], '🟡')} Good", 0xFACC15
+    else:
+        status, color = f"{E(['Error', 'warn'], '🔴')} Degraded", 0xEF4444
+    head = discord.ui.TextDisplay(f"### {E(['ping', 'latency'], '⚡')} Pong\n-# Connection to Discord")
+    stats = discord.ui.TextDisplay(f"**Latency** · `{ms} ms`\n**Status** · {status}")
+    container = discord.ui.Container(
+        head,
+        discord.ui.Separator(),
+        stats,
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(f"-# {BOT_NAME} · v{BOT_VERSION}"),
+        accent_colour=color,
+    )
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
+    return view
 
 def fixed_emoji(name: str, emoji_id: int, animated: bool = False) -> str:
     return f"<{'a' if animated else ''}:{name}:{emoji_id}>"
@@ -695,11 +709,11 @@ async def addemojirole_prefix(ctx: commands.Context, emoji: str, role: discord.R
 
 @bot.tree.command(name="ping", description="Show the bot's current latency.")
 async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=build_ping_embed())
+    await interaction.response.send_message(view=build_ping_layout())
 
 @bot.command(name="ping")
 async def ping_prefix(ctx: commands.Context):
-    await ctx.send(embed=build_ping_embed())
+    await ctx.send(view=build_ping_layout())
 
 @bot.tree.command(name="serverinfo", description="Show statistics and information about this server.")
 @app_commands.guild_only()
@@ -769,6 +783,11 @@ ADMIN_COMMANDS = [
     ("welcomes-setup", "Send new member welcomes to a channel.", "/welcomes-setup channel", "Manage Server"),
     ("welcomes-on", "Turn welcomes back on in the default channel.", "/welcomes-on", "Manage Server"),
     ("welcomes-off", "Turn new member welcomes off.", "/welcomes-off", "Manage Server"),
+    ("tickets-log", "Ticket log: who opened it, who claimed it, duration, members and transcript.", "/tickets-log [number]", "Staff"),
+    ("invites-setup", "Post a message whenever someone joins with an invite, with their invite count.", "/invites-setup channel", "Manage Server"),
+    ("invites-off", "Stop posting invite messages.", "/invites-off", "Manage Server"),
+    ("despedidas-setup", "Send a goodbye message to a channel when members leave.", "/despedidas-setup channel", "Manage Server"),
+    ("despedidas-off", "Turn goodbye messages off.", "/despedidas-off", "Manage Server"),
     ("ban", "Ban a member, or a user by ID, and optionally delete their recent messages.", "/ban member [reason] [delete_days]  ·  !ban user [reason]", "Ban Members"),
     ("unban", "Unban a user by their ID.", "/unban user_id [reason]  ·  !unban user_id [reason]", "Ban Members"),
     ("kick", "Kick a member from the server.", "/kick member [reason]  ·  !kick member [reason]", "Kick Members"),
@@ -2012,16 +2031,19 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
         embed=notice(f"{E('true', '✅')} Your ticket is ready: {channel.mention}"), ephemeral=True
     )
 
-async def _transcript_bytes(channel: discord.TextChannel) -> bytes:
+async def _collect_transcript(channel: discord.TextChannel) -> tuple[bytes, dict[str, str]]:
     lines = []
+    people: dict[str, str] = {}
     async for m in channel.history(limit=None, oldest_first=True):
+        if not m.author.bot:
+            people[str(m.author.id)] = str(m.author)
         text = m.content or ""
         if m.embeds:
             text += " [embed]"
         if m.attachments:
             text += " " + " ".join(a.url for a in m.attachments)
         lines.append(f"[{m.created_at:%Y-%m-%d %H:%M:%S} UTC] {m.author} ({m.author.id}): {text}")
-    return ("\n".join(lines) or "(no messages)").encode("utf-8")
+    return ("\n".join(lines) or "(no messages)").encode("utf-8"), people
 
 async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, closed_by: str) -> None:
     ticket = ticket_data["open"].pop(str(channel.id), None)
@@ -2029,7 +2051,10 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
         return
     save_tickets()
 
-    data = await _transcript_bytes(channel) if SAVE_TRANSCRIPTS else None
+    data, people = None, {}
+    if SAVE_TRANSCRIPTS:
+        data, people = await _collect_transcript(channel)
+    _save_closed_ticket(channel, ticket, closed_by, data, people)
     duration = fmt_seconds(now_ts() - ticket["opened_at"])
     owner_mention = f"<@{ticket['user_id']}>"
 
@@ -2074,6 +2099,125 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
         await channel.delete(reason=f"Ticket closed by {closed_by}")
     except discord.HTTPException:
         pass
+
+TICKET_HISTORY_FILE = DATA_DIR / "tickets_history.json"
+TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
+ticket_history: dict[str, dict] = {}
+
+
+def load_ticket_history() -> None:
+    global ticket_history
+    try:
+        ticket_history = json.loads(TICKET_HISTORY_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        ticket_history = {}
+
+
+def save_ticket_history() -> None:
+    TICKET_HISTORY_FILE.write_text(json.dumps(ticket_history, indent=2), encoding="utf-8")
+
+
+def _save_closed_ticket(channel, ticket: dict, closed_by: str, data: bytes | None, people: dict[str, str]) -> None:
+    transcript_path = None
+    if data is not None:
+        TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+        path = TRANSCRIPTS_DIR / f"{channel.id}.txt"
+        path.write_bytes(data)
+        transcript_path = str(path)
+    ticket_history[str(channel.id)] = {
+        "number": ticket.get("number", 0),
+        "type": ticket.get("type", "Ticket"),
+        "owner_id": ticket["user_id"],
+        "claimed_by": ticket.get("claimed_by"),
+        "opened_at": ticket["opened_at"],
+        "closed_at": now_ts(),
+        "closed_by": closed_by,
+        "participants": people,
+        "transcript": transcript_path,
+    }
+    save_ticket_history()
+
+
+def _member_line(uid: str, people: dict[str, str]) -> str:
+    return f"• <@{uid}> · `{uid}` · {people.get(uid, 'unknown')}"
+
+
+@bot.tree.command(name="tickets-log", description="Show a ticket's log: opener, staff, duration, members and transcript.")
+@app_commands.describe(number="Ticket number, e.g. 12. Leave empty to use this channel.")
+@app_commands.guild_only()
+async def tickets_log(interaction: discord.Interaction, number: int | None = None):
+    if not is_staff(interaction.user):
+        return await interaction.response.send_message(embed=error_notice("Only staff can use this."), ephemeral=True)
+    if number is None:
+        key = str(interaction.channel_id)
+    else:
+        key = next((cid for cid, t in ticket_data["open"].items() if t.get("number") == number), None)
+        if key is None:
+            key = next((cid for cid, r in ticket_history.items() if r.get("number") == number), None)
+    if key is None or (key not in ticket_data["open"] and key not in ticket_history):
+        return await interaction.response.send_message(embed=error_notice("I couldn't find that ticket."), ephemeral=True)
+
+    await interaction.response.defer()
+    if key in ticket_data["open"]:
+        live = ticket_data["open"][key]
+        channel = interaction.guild.get_channel(int(key))
+        data, people = None, {}
+        if channel is not None:
+            data, people = await _collect_transcript(channel)
+        record = {
+            "number": live.get("number", 0), "type": live.get("type", "Ticket"), "owner_id": live["user_id"],
+            "claimed_by": live.get("claimed_by"), "opened_at": live["opened_at"], "closed_at": None,
+            "closed_by": None, "participants": people,
+        }
+        transcript = discord.File(io.BytesIO(data), filename=f"ticket-{record['number']:04d}.txt") if data is not None else None
+    else:
+        record = ticket_history[key]
+        path = record.get("transcript")
+        transcript = discord.File(path, filename=f"ticket-{record['number']:04d}.txt") if path and Path(path).exists() else None
+
+    owner = record["owner_id"]
+    claimed = record.get("claimed_by")
+    closed = record.get("closed_at")
+    duration = fmt_seconds((closed or now_ts()) - record["opened_at"])
+    people = dict(record.get("participants") or {})
+    ordered = [str(owner)]
+    if claimed:
+        ordered.append(str(claimed))
+    ordered += [uid for uid in people if uid not in ordered]
+    member_lines = [_member_line(uid, people) for uid in ordered[:25]]
+    if len(ordered) > 25:
+        member_lines.append(f"-# +{len(ordered) - 25} more")
+    claimed_text = f"<@{claimed}> · `{claimed}`" if claimed else "Not claimed"
+    info = [
+        f"**Opened by** <@{owner}> · `{owner}`",
+        f"**Claimed by** {claimed_text}",
+        f"**Opened** <t:{record['opened_at']}:f>",
+    ]
+    if closed:
+        info.append(f"**Closed** <t:{closed}:f> by {record.get('closed_by') or 'Unknown'}")
+    info.append(f"**Duration** {duration}")
+    status = f"{E('Error', '🔒')} Closed" if closed else f"{E('true', '🟢')} Open"
+    note = "Transcript attached" if transcript is not None else "No transcript saved"
+    container = discord.ui.Container(
+        discord.ui.TextDisplay(f"### 🎫 Ticket #{record['number']:04d} · {record['type']}\n-# {status}"),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay("\n".join(info)),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay("**Members**\n" + "\n".join(member_lines)),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(f"-# {BOT_NAME} · Ticket log · {note}"),
+        accent_colour=STEEL,
+    )
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
+    if transcript is not None:
+        await interaction.followup.send(view=view, file=transcript)
+    else:
+        await interaction.followup.send(view=view)
+
+
+load_ticket_history()
+
 
 class ConfirmView(discord.ui.View):
     def __init__(self, on_confirm, label: str = "Confirm", style: discord.ButtonStyle = discord.ButtonStyle.danger):
@@ -2348,6 +2492,77 @@ def build_welcome_layout(member: discord.Member) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(container)
     return view
+
+GOODBYES_FILE = DATA_DIR / "goodbyes.json"
+goodbye_config: dict[str, int] = {}
+
+
+def load_goodbyes() -> None:
+    global goodbye_config
+    try:
+        goodbye_config = json.loads(GOODBYES_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        goodbye_config = {}
+
+
+def save_goodbyes() -> None:
+    GOODBYES_FILE.write_text(json.dumps(goodbye_config, indent=2), encoding="utf-8")
+
+
+def build_goodbye_layout(member: discord.Member) -> discord.ui.LayoutView:
+    head = discord.ui.Section(
+        discord.ui.TextDisplay(f"# {E('GE_member', '👋')} Goodbye, {member.display_name}"),
+        accessory=discord.ui.Thumbnail(member.display_avatar.url),
+    )
+    container = discord.ui.Container(
+        head,
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(f"{member.display_name} left **{WELCOME_SERVER_NAME}**.\n«We hope to see you again soon.»"),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(f"-# {E('GE_member', '👤')} Members now: {member.guild.member_count}"),
+        accent_colour=STEEL,
+    )
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
+    return view
+
+
+async def _send_goodbye(member: discord.Member) -> None:
+    channel_id = goodbye_config.get(str(member.guild.id))
+    channel = member.guild.get_channel(channel_id) if channel_id else None
+    if channel is None:
+        return
+    try:
+        await channel.send(view=build_goodbye_layout(member), allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as exc:
+        print(f"[goodbye] could not post: {exc}")
+
+
+@bot.tree.command(name="despedidas-setup", description="Send a goodbye message to a channel when members leave.")
+@app_commands.describe(channel="The channel for goodbye messages")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def despedidas_setup(interaction: discord.Interaction, channel: discord.TextChannel):
+    goodbye_config[str(interaction.guild_id)] = channel.id
+    save_goodbyes()
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} Goodbye messages will be sent to {channel.mention}."), ephemeral=True
+    )
+
+
+@bot.tree.command(name="despedidas-off", description="Turn goodbye messages off.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def despedidas_off(interaction: discord.Interaction):
+    goodbye_config.pop(str(interaction.guild_id), None)
+    save_goodbyes()
+    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Goodbye messages are off."), ephemeral=True)
+
+
+bot.add_listener(_send_goodbye, "on_member_remove")
+load_goodbyes()
 
 AUTOROLES_FILE = DATA_DIR / "autoroles.json"
 autoroles: dict[str, int] = {}
@@ -3143,7 +3358,7 @@ MODLOG_EVENTS = {
     "voice": "Voice join, leave and move",
     "message_delete": "Messages deleted",
     "message_edit": "Messages edited",
-    "photo": "Photos and images uploaded",
+    "photo": "Photos deleted (with image)",
     "emoji": "Emojis created, deleted or renamed",
     "sticker": "Stickers created, deleted or renamed",
 }
@@ -3210,7 +3425,7 @@ MODLOG_ICONS = {
     "Moved voice": ("transfer", "🔁"),
     "Message deleted": ("false", "🗑️"),
     "Message edited": ("transfer", "✏️"),
-    "Photo uploaded": ("community", "🖼️"),
+    "Photo deleted": ("false", "🗑️"),
     "Emoji created": ("true", "✅"),
     "Emoji deleted": ("false", "❌"),
     "Emoji renamed": ("transfer", "🔁"),
@@ -3220,7 +3435,7 @@ MODLOG_ICONS = {
 }
 
 
-def _action_card(title: str, color: int, target, fields: list[tuple[str, str]]) -> discord.ui.LayoutView:
+def _action_card(title: str, color: int, target, fields: list[tuple[str, str]], media: list[str] | None = None) -> discord.ui.LayoutView:
     icon_name, icon_fallback = MODLOG_ICONS.get(title, ("synexprotect", "🛡️"))
     title = f"{E(icon_name, icon_fallback)} {title}"
     details = "\n\n".join(f"**{name}**\n{value or 'None'}" for name, value in fields)
@@ -3228,14 +3443,11 @@ def _action_card(title: str, color: int, target, fields: list[tuple[str, str]]) 
     avatar = _avatar_url(target)
     head_text = discord.ui.TextDisplay(f"### {title}\n-# {_who(target) if target else 'SynexProtect'}")
     head = (discord.ui.Section(head_text, accessory=discord.ui.Thumbnail(avatar)) if avatar else head_text)
-    container = discord.ui.Container(
-        head,
-        discord.ui.Separator(),
-        discord.ui.TextDisplay(details),
-        discord.ui.Separator(),
-        discord.ui.TextDisplay(f"-# {BOT_NAME} · Moderation · {stamp}"),
-        accent_colour=color,
-    )
+    children = [head, discord.ui.Separator(), discord.ui.TextDisplay(details)]
+    if media:
+        children += [discord.ui.Separator(), discord.ui.MediaGallery(*[discord.MediaGalleryItem(u) for u in media[:10]])]
+    children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# {BOT_NAME} · Moderation · {stamp}")]
+    container = discord.ui.Container(*children, accent_colour=color)
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(container)
     return view
@@ -3616,10 +3828,96 @@ async def on_invite_delete(invite: discord.Invite):
     await _modlog(guild, "invite_delete", "Invite deleted", STEEL, None, fields)
 
 
+INVITES_FILE = DATA_DIR / "invites.json"
+invites_store: dict = {"channels": {}, "counts": {}, "joins": {}}
+
+
+def load_invites() -> None:
+    global invites_store
+    try:
+        invites_store = json.loads(INVITES_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        invites_store = {}
+    for key in ("channels", "counts", "joins"):
+        invites_store.setdefault(key, {})
+
+
+def save_invites() -> None:
+    INVITES_FILE.write_text(json.dumps(invites_store, indent=2), encoding="utf-8")
+
+
+async def _record_invite(member: discord.Member, inviter) -> None:
+    guild = member.guild
+    gid = str(guild.id)
+    total = 0
+    if inviter is not None and not inviter.bot and inviter.id != member.id:
+        counts = invites_store["counts"].setdefault(gid, {})
+        counts[str(inviter.id)] = counts.get(str(inviter.id), 0) + 1
+        invites_store["joins"].setdefault(gid, {})[str(member.id)] = inviter.id
+        save_invites()
+        total = counts[str(inviter.id)]
+    channel_id = invites_store["channels"].get(gid)
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if channel is None:
+        return
+    who = inviter.mention if inviter is not None else "**Unknown**"
+    message = f"{who} invitó a {member.mention} y tiene **{total}** invites"
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(
+        discord.ui.TextDisplay(f"### {E(['GE_member', 'community'], '🔗')} New invite"),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(message),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(f"-# {BOT_NAME} · Invites"),
+        accent_colour=STEEL,
+    ))
+    try:
+        await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as exc:
+        print(f"[invites] could not post: {exc}")
+
+
+async def _on_invite_member_leave(member: discord.Member) -> None:
+    gid = str(member.guild.id)
+    inviter_id = invites_store["joins"].get(gid, {}).pop(str(member.id), None)
+    if inviter_id is None:
+        return
+    counts = invites_store["counts"].get(gid, {})
+    key = str(inviter_id)
+    if counts.get(key, 0) > 0:
+        counts[key] -= 1
+    save_invites()
+
+
+@bot.tree.command(name="invites-setup", description="Post a message whenever someone joins with an invite.")
+@app_commands.describe(channel="The channel for invite messages")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def invites_setup(interaction: discord.Interaction, channel: discord.TextChannel):
+    invites_store["channels"][str(interaction.guild_id)] = channel.id
+    save_invites()
+    await interaction.response.send_message(
+        embed=notice(f"{E('true', '✅')} Invite messages will be sent to {channel.mention}."), ephemeral=True
+    )
+
+
+@bot.tree.command(name="invites-off", description="Stop posting invite messages.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guild_only()
+async def invites_off(interaction: discord.Interaction):
+    invites_store["channels"].pop(str(interaction.guild_id), None)
+    save_invites()
+    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Invite messages are off."), ephemeral=True)
+
+
+bot.add_listener(_on_invite_member_leave, "on_member_remove")
+load_invites()
+
+
 async def _log_invite_join(member: discord.Member) -> None:
     guild = member.guild
-    if not _event_on(guild, "invite_join"):
-        return
     try:
         invites = await guild.invites()
     except discord.HTTPException:
@@ -3629,6 +3927,9 @@ async def _log_invite_join(member: discord.Member) -> None:
     used = next((inv for code, inv in current.items() if (inv.uses or 0) > previous.get(code, 0)), None)
     gone = [code for code in previous if code not in current]
     _invite_cache[guild.id] = {code: (inv.uses or 0) for code, inv in current.items()}
+    await _record_invite(member, used.inviter if used is not None else None)
+    if not _event_on(guild, "invite_join"):
+        return
     if used is not None:
         code_text = f"`discord.gg/{used.code}`"
         inviter_text = used.inviter.mention if used.inviter else "Unknown"
@@ -3639,6 +3940,91 @@ async def _log_invite_join(member: discord.Member) -> None:
         code_text, inviter_text, channel_text = "Unknown (vanity or unknown link)", "Unknown", "Unknown"
     fields = [("Member", _who(member)), ("Invite", code_text), ("Invited by", inviter_text), ("Channel", channel_text)]
     await _modlog(guild, "invite_join", "Member joined by invite", CHARCOAL, member, fields)
+
+
+import aiohttp
+
+ANIME_ACTIONS = {
+    "hug": {"category": "hug", "emoji": "🤗", "color": 0xEC4899, "text": "{a} abraza a {b}",
+            "solo": "{a} se da un abrazo", "back": "{a} devuelve el abrazo a {b}"},
+    "kiss": {"category": "kiss", "emoji": "💋", "color": 0xEC4899, "text": "{a} le da un beso a {b}",
+             "solo": "{a} se manda un beso", "back": "{a} le devuelve el beso a {b}"},
+    "punch": {"category": "punch", "emoji": "👊", "color": 0xEF4444, "text": "{a} le pega a {b}",
+              "solo": "{a} se pega solo", "back": "{a} le devuelve el golpe a {b}"},
+    "cry": {"category": "cry", "emoji": "😭", "color": 0x3B82F6, "text": "{a} está llorando por culpa de {b}",
+            "solo": "{a} está llorando", "back": None},
+    "sleep": {"category": "sleep", "emoji": "😴", "color": 0x1E3A8A, "text": "{a} duerme junto a {b}",
+              "solo": "{a} se fue a dormir", "back": None},
+    "banana": {"category": "happy", "emoji": "🍌", "color": 0xFACC15, "text": "{a} le regala una banana a {b}",
+               "solo": "{a} disfruta su banana", "back": None},
+}
+
+
+async def _anime_gif(category: str) -> str | None:
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
+            async with session.get(f"https://nekos.best/api/v2/{category}") as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+        results = data.get("results") or []
+        return results[0].get("url") if results else None
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        print(f"[anime] could not fetch {category}: {exc}")
+        return None
+
+
+class AnimeView(discord.ui.LayoutView):
+    def __init__(self, text, gif, color, *, author=None, target=None, back_text=None, category=None):
+        super().__init__(timeout=300)
+        self.author = author
+        self.target = target
+        self.back_text = back_text
+        self.category = category
+        self.color = color
+        children = [discord.ui.TextDisplay(f"### {text}")]
+        if gif:
+            children += [discord.ui.Separator(), discord.ui.MediaGallery(discord.MediaGalleryItem(gif))]
+        if target is not None and back_text:
+            button = discord.ui.Button(label="Devolver", emoji="↩️", style=discord.ButtonStyle.secondary)
+            button.callback = self._give_back
+            children += [discord.ui.Separator(), discord.ui.ActionRow(button)]
+        children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# {BOT_NAME} · Anime reactions")]
+        self.add_item(discord.ui.Container(*children, accent_colour=color))
+
+    async def _give_back(self, interaction: discord.Interaction):
+        if interaction.user.id != self.target.id:
+            return await interaction.response.send_message(
+                embed=error_notice("Only the person who received it can give it back."), ephemeral=True
+            )
+        await interaction.response.defer()
+        gif = await _anime_gif(self.category)
+        text = self.back_text.format(a=self.target.mention, b=self.author.mention)
+        await interaction.followup.send(view=AnimeView(text, gif, self.color))
+
+
+async def _send_anime(ctx: commands.Context, name: str, member: discord.Member | None) -> None:
+    cfg = ANIME_ACTIONS[name]
+    target = member if member is not None and member.id != ctx.author.id else None
+    if target is None:
+        text = cfg["solo"].format(a=ctx.author.mention)
+    else:
+        text = cfg["text"].format(a=ctx.author.mention, b=target.mention)
+    gif = await _anime_gif(cfg["category"])
+    view = AnimeView(f"{cfg['emoji']} {text}", gif, cfg["color"], author=ctx.author, target=target,
+                     back_text=cfg["back"], category=cfg["category"])
+    await ctx.send(view=view)
+
+
+def _register_anime_command(name: str) -> None:
+    @bot.command(name=name)
+    @commands.guild_only()
+    async def anime_command(ctx: commands.Context, member: Optional[discord.Member] = None):
+        await _send_anime(ctx, name, member)
+
+
+for _anime_name in ANIME_ACTIONS:
+    _register_anime_command(_anime_name)
 
 
 def _excerpt(text: str | None, limit: int = 900) -> str:
@@ -3656,6 +4042,17 @@ def _skip_message_log(message: discord.Message) -> bool:
 
 async def _on_message_delete(message: discord.Message) -> None:
     if _skip_message_log(message):
+        return
+    images = [a for a in message.attachments if (a.content_type or "").startswith("image/")]
+    if images:
+        fields = [
+            ("Author", _who(message.author)),
+            ("Channel", _chan(message.channel)),
+            ("Images", str(len(images))),
+            ("Text", _excerpt(message.content)),
+        ]
+        await _send_log(message.guild, "photo", "Photo deleted", STEEL, message.author, fields,
+                        [a.url for a in images])
         return
     attachments = ", ".join(a.filename for a in message.attachments) or "None"
     fields = [
@@ -3680,21 +4077,20 @@ async def _on_message_edit(before: discord.Message, after: discord.Message) -> N
     await _modlog(after.guild, "message_edit", "Message edited", STEEL, after.author, fields)
 
 
-async def _on_message_photos(message: discord.Message) -> None:
-    if _skip_message_log(message):
+async def _send_log(guild, event: str, title: str, color: int, target, fields, media=None) -> None:
+    if not _event_on(guild, event):
         return
-    images = [a for a in message.attachments if (a.content_type or "").startswith("image/")]
-    if not images:
+    channel = guild.get_channel(modlog_cfg(guild.id)["channel"])
+    if channel is None:
         return
-    links = "\n".join(f"[{a.filename}]({a.url})" for a in images[:10])
-    fields = [
-        ("Author", _who(message.author)),
-        ("Channel", _chan(message.channel)),
-        ("Images", str(len(images))),
-        ("Files", links),
-        ("Message", f"[Jump to message]({message.jump_url})"),
-    ]
-    await _modlog(message.guild, "photo", "Photo uploaded", STEEL, message.author, fields)
+    try:
+        await channel.send(view=_action_card(title, color, target, fields, media),
+                           allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as exc:
+        print(f"[modlog] could not post: {exc}")
+        if media:
+            links = "\n".join(f"[Image {i + 1}]({url})" for i, url in enumerate(media[:10]))
+            await _send_log(guild, event, title, color, target, fields + [("Images", links)])
 
 
 async def _actor_of(guild: discord.Guild, action, target_id: int):
@@ -3741,7 +4137,6 @@ async def _on_stickers_changed(guild, before, after) -> None:
 
 bot.add_listener(_on_message_delete, "on_message_delete")
 bot.add_listener(_on_message_edit, "on_message_edit")
-bot.add_listener(_on_message_photos, "on_message")
 bot.add_listener(_on_emojis_changed, "on_guild_emojis_update")
 bot.add_listener(_on_stickers_changed, "on_guild_stickers_update")
 
