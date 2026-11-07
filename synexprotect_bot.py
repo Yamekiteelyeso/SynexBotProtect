@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.32.7"
+BOT_VERSION = "1.32.9"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -2788,7 +2788,7 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
     if attachment is not None and isinstance(tchannel, discord.TextChannel):
         try:
             await tchannel.send(
-                view=as_v2(base_embed("📄 Transcript", f"{channel.name} · opened by {owner_mention}", STEEL)),
+                embed=base_embed("📄 Transcript", f"{channel.name} · opened by {owner_mention}", STEEL),
                 file=attachment,
             )
         except discord.HTTPException as exc:
@@ -2813,19 +2813,14 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
             dm_embed.add_field(name="Reason", value=reason[:1024], inline=False)
         sent = False
         if owner is not None:
-            # 1) the styled message with the file, 2) plain embed with the file if the first one is refused
-            for attempt in (lambda: owner.send(view=as_v2(dm_embed), file=transcript_file()),
-                            lambda: owner.send(embed=dm_embed, file=transcript_file())):
-                if attachment is None:
-                    attempt = lambda: owner.send(embed=dm_embed)
-                try:
-                    await attempt()
-                    sent = True
-                    break
-                except discord.HTTPException as exc:
-                    print(f"[tickets] DM attempt to {ticket['user_id']} failed: {exc!r}")
-                if attachment is None:
-                    break
+            try:
+                if attachment is not None:
+                    await owner.send(embed=dm_embed, file=transcript_file())
+                else:
+                    await owner.send(embed=dm_embed)
+                sent = True
+            except discord.HTTPException as exc:
+                print(f"[tickets] DM to {ticket['user_id']} failed: {exc!r}")
         if not sent and isinstance(tchannel, discord.TextChannel):
             try:
                 await tchannel.send(view=as_v2(notice(
@@ -2952,7 +2947,13 @@ async def tickets_log(interaction: discord.Interaction, number: int | None = Non
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(container)
     if transcript is not None:
-        await interaction.followup.send(view=view, file=transcript)
+        # Components V2 messages do not display uploaded files, so this one is a classic embed.
+        log_embed = discord.Embed(
+            title=f"🎫 Ticket #{record['number']:04d} · {record['type']}",
+            description=f"{status}\n\n" + "\n".join(info) + "\n\n**Members**\n" + "\n".join(member_lines),
+            color=STEEL)
+        log_embed.set_footer(text=f"{BOT_NAME} · Ticket log · {note}")
+        await interaction.followup.send(embed=log_embed, file=transcript)
     else:
         await interaction.followup.send(view=view)
 
@@ -5501,7 +5502,7 @@ async def _anime_gif(category: str) -> str | None:
 class AnimeView(discord.ui.LayoutView):
     def __init__(self, text, gif, color, *, gid=0, author=None, target=None, back_text=None, category=None,
                  action=None, note=None):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)  # the return button works until the bot restarts
         self.gid = gid
         self.author = author
         self.target = target
