@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.32.4"
+BOT_VERSION = "1.32.5"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -2354,7 +2354,7 @@ def build_ticket_controls(ticket: dict, head: str = "", body: str = "", avatar_u
     container = discord.ui.Container(
         head_block,
         discord.ui.TextDisplay(body),
-        discord.ui.TextDisplay("-# Staff tools are above · Only staff can use them"),
+        discord.ui.TextDisplay("-# Staff tools are below · Only staff can use them"),
         discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.ActionRow(staff_menu),
         row_buttons,
