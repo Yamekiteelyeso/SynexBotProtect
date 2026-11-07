@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.30.1"
+BOT_VERSION = "1.30.2"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -120,11 +120,12 @@ COLOR_NAMES = {
     "Brown": 0x78350F,
 }
 
-def embed_children(embed: discord.Embed) -> list:
-    """The Components V2 pieces that show a classic embed: text, thumbnail and image."""
+def embed_children(embed: discord.Embed, prefix: str | None = None) -> list:
+    """The Components V2 pieces that show a classic embed: one text block, plus thumbnail and image.
+    The author line is skipped on purpose: base_embed already puts the bot name in the footer."""
     lines = []
-    if embed.author is not None and embed.author.name:
-        lines.append(f"-# {embed.author.name}")
+    if prefix:
+        lines.append(prefix)
     if embed.title:
         lines.append(f"### {embed.title}")
     if embed.description:
@@ -148,9 +149,7 @@ def embed_children(embed: discord.Embed) -> list:
 def as_v2(embed: discord.Embed, prefix: str | None = None) -> discord.ui.LayoutView:
     """Shows a classic embed as a Components V2 message. `prefix` is text shown above it (replaces `content`)."""
     colour = embed.colour.value if embed.colour is not None else STEEL
-    children = embed_children(embed)
-    if prefix:
-        children.insert(0, discord.ui.TextDisplay(prefix))
+    children = embed_children(embed, prefix)
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(*children, accent_colour=colour))
     return view
