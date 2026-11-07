@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.29.0"
+BOT_VERSION = "1.29.1"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -5381,6 +5381,11 @@ def load_anime_stats() -> None:
     anime_stats = read_json(ANIME_STATS_FILE)
 
 
+def _anime_name(member) -> str:
+    """Anime texts show the name in bold instead of a mention tag."""
+    return f"**{member.display_name}**"
+
+
 def _pair_note(gid: int, action: str, a, b) -> str | None:
     if action not in ANIME_COUNTED:
         return None
@@ -5388,7 +5393,7 @@ def _pair_note(gid: int, action: str, a, b) -> str | None:
     key = f"{gid}:{action}:{low}:{high}"
     anime_stats[key] = anime_stats.get(key, 0) + 1
     write_json_atomic(ANIME_STATS_FILE, anime_stats)
-    return tr(gid, "anime.note", a=a.mention, b=b.mention, n=anime_stats[key], noun=tr(gid, f"anime.{action}.noun"))
+    return tr(gid, "anime.note", a=_anime_name(a), b=_anime_name(b), n=anime_stats[key], noun=tr(gid, f"anime.{action}.noun"))
 
 
 load_anime_stats()
@@ -5438,7 +5443,7 @@ class AnimeView(discord.ui.LayoutView):
             )
         await interaction.response.defer()
         gif = await _anime_gif(self.category)
-        text = tr(self.gid, f"anime.{self.action}.back", a=self.target.mention, b=self.author.mention)
+        text = tr(self.gid, f"anime.{self.action}.back", a=_anime_name(self.target), b=_anime_name(self.author))
         note = _pair_note(self.gid, self.action, self.target, self.author)
         await interaction.followup.send(view=AnimeView(f"{ANIME_ACTIONS[self.action]['emoji']} {text}", gif, self.color,
                                                        gid=self.gid, action=self.action, note=note))
@@ -5456,9 +5461,9 @@ async def _send_anime(author, guild, name: str, member, send) -> None:
     if name == "banana":
         centimeters = random.randint(5, 30)
         if target is None:
-            text = tr(gid, "anime.banana.measure", a=author.mention, cm=centimeters)
+            text = tr(gid, "anime.banana.measure", a=_anime_name(author), cm=centimeters)
         else:
-            text = tr(gid, "anime.banana.measure_for", a=author.mention, b=target.mention, cm=centimeters)
+            text = tr(gid, "anime.banana.measure_for", a=_anime_name(author), b=_anime_name(target), cm=centimeters)
         gif = BANANA_IMAGE_URL
         if BANANA_IMAGE.exists():
             file = discord.File(BANANA_IMAGE, filename="banana.png")
@@ -5466,9 +5471,9 @@ async def _send_anime(author, guild, name: str, member, send) -> None:
         view = AnimeView(f"{cfg['emoji']} {text}", gif, cfg["color"], gid=gid)
     else:
         if target is None:
-            text = tr(gid, f"anime.{name}.solo", a=author.mention)
+            text = tr(gid, f"anime.{name}.solo", a=_anime_name(author))
         else:
-            text = tr(gid, f"anime.{name}.text", a=author.mention, b=target.mention)
+            text = tr(gid, f"anime.{name}.text", a=_anime_name(author), b=_anime_name(target))
         note = _pair_note(gid, name, author, target) if target is not None else None
         gif = await _anime_gif(cfg["category"])
         back_text = tr(gid, f"anime.{name}.back") if cfg["back"] and target is not None else None
