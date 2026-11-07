@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.30.2"
+BOT_VERSION = "1.30.4"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -121,7 +121,7 @@ COLOR_NAMES = {
 }
 
 def embed_children(embed: discord.Embed, prefix: str | None = None) -> list:
-    """The Components V2 pieces that show a classic embed: one text block, plus thumbnail and image.
+    """The Components V2 pieces that show a classic embed: the text, a divider, the footer, and the image.
     The author line is skipped on purpose: base_embed already puts the bot name in the footer."""
     lines = []
     if prefix:
@@ -132,8 +132,6 @@ def embed_children(embed: discord.Embed, prefix: str | None = None) -> list:
         lines.append(embed.description)
     for field in embed.fields:
         lines.append(f"**{field.name}**\n{field.value}" if field.name else field.value)
-    if embed.footer is not None and embed.footer.text:
-        lines.append(f"-# {embed.footer.text}")
     text = "\n".join(lines) or "\u200b"
     children = []
     if embed.thumbnail is not None and embed.thumbnail.url:
@@ -141,8 +139,12 @@ def embed_children(embed: discord.Embed, prefix: str | None = None) -> list:
                                            accessory=discord.ui.Thumbnail(embed.thumbnail.url)))
     else:
         children.append(discord.ui.TextDisplay(text))
+    if embed.footer is not None and embed.footer.text:
+        children += [discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
+                     discord.ui.TextDisplay(f"-# {embed.footer.text}")]
     if embed.image is not None and embed.image.url:
-        children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.MediaGallery(discord.MediaGalleryItem(embed.image.url))]
+        children += [discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
+                     discord.ui.MediaGallery(discord.MediaGalleryItem(embed.image.url))]
     return children
 
 
@@ -226,7 +228,7 @@ class V2Panel(discord.ui.LayoutView):
                 accent = self._body.colour.value
         rows = self._rows()
         if children and rows:
-            children.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+            children.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small))
         children += rows
         if not children:
             children = [discord.ui.TextDisplay("\u200b")]
@@ -359,9 +361,9 @@ def build_ping_layout() -> discord.ui.LayoutView:
     stats = discord.ui.TextDisplay(f"**Latency** · `{ms} ms`\n**Status** · {status}")
     container = discord.ui.Container(
         head,
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         stats,
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(f"-# {BOT_NAME} · v{BOT_VERSION}"),
         accent_colour=color,
     )
@@ -454,9 +456,9 @@ def build_server_layout(guild: discord.Guild, section: str = "server", page: int
 
     children = [
         head,
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(body),
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.ActionRow(select),
     ]
 
@@ -517,9 +519,9 @@ def build_botinfo_layout() -> discord.ui.LayoutView:
     )
     container = discord.ui.Container(
         head,
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         stats,
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(f"-# {BOT_NAME} · v{BOT_VERSION}"),
         accent_colour=STEEL,
     )
@@ -2348,7 +2350,7 @@ def build_ticket_controls(ticket: dict, head: str = "", body: str = "", avatar_u
         head_block,
         discord.ui.TextDisplay(body),
         discord.ui.TextDisplay("-# Staff tools are above · Only staff can use them"),
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.ActionRow(staff_menu),
         row_buttons,
         accent_colour=STEEL,
@@ -2905,11 +2907,11 @@ async def tickets_log(interaction: discord.Interaction, number: int | None = Non
     note = "Transcript attached" if transcript is not None else "No transcript saved"
     container = discord.ui.Container(
         discord.ui.TextDisplay(f"### 🎫 Ticket #{record['number']:04d} · {record['type']}\n-# {status}"),
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay("\n".join(info)),
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay("**Members**\n" + "\n".join(member_lines)),
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(f"-# {BOT_NAME} · Ticket log · {note}"),
         accent_colour=STEEL,
     )
@@ -3375,11 +3377,11 @@ async def _on_member_boost(before: discord.Member, after: discord.Member) -> Non
     )
     container = discord.ui.Container(
         head,
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(body),
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(tr(gid, "boost.stats", **stats)),
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(f"-# {BOT_NAME} · Server boosts"),
         accent_colour=boost_color(gid),
     )
@@ -4674,9 +4676,9 @@ def build_protection_layout(guild: discord.Guild, section: str = "overview", rul
     body, rows = SECTION_BUILDERS.get(section, _overview_section)(guild, cfg, rule_key)
     children = [
         discord.ui.TextDisplay(f"### Protection Panel\n-# {guild.name} · Owner only"),
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.ActionRow(nav),
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(body),
         *rows,
         discord.ui.TextDisplay("-# Changes apply right away"),
@@ -4793,10 +4795,10 @@ def _action_card(title: str, color: int, target, fields: list[tuple[str, str]], 
     avatar = _avatar_url(target)
     head_text = discord.ui.TextDisplay(f"### {title}\n-# {_who(target) if target else 'SynexProtect'}")
     head = (discord.ui.Section(head_text, accessory=discord.ui.Thumbnail(avatar)) if avatar else head_text)
-    children = [head, discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.TextDisplay(details)]
+    children = [head, discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small), discord.ui.TextDisplay(details)]
     if media:
-        children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.MediaGallery(*[discord.MediaGalleryItem(u) for u in media[:10]])]
-    children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.TextDisplay(f"-# {BOT_NAME} · Moderation · {stamp}")]
+        children += [discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small), discord.ui.MediaGallery(*[discord.MediaGalleryItem(u) for u in media[:10]])]
+    children += [discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small), discord.ui.TextDisplay(f"-# {BOT_NAME} · Moderation · {stamp}")]
     container = discord.ui.Container(*children, accent_colour=color)
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(container)
@@ -5227,9 +5229,9 @@ async def _record_invite(member: discord.Member, inviter) -> None:
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(
         discord.ui.TextDisplay(f"### {E(['GE_member', 'community'], '🔗')} {tr(guild.id, 'invites.new')}"),
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(message),
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(f"-# {BOT_NAME} · Invites"),
         accent_colour=STEEL,
     ))
@@ -5435,12 +5437,12 @@ class AnimeView(discord.ui.LayoutView):
         if note:
             children.append(discord.ui.TextDisplay(note))
         if gif:
-            children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.MediaGallery(discord.MediaGalleryItem(gif))]
+            children += [discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small), discord.ui.MediaGallery(discord.MediaGalleryItem(gif))]
         if target is not None and back_text:
             button = discord.ui.Button(label=tr(gid, "anime.return"), emoji="↩️", style=discord.ButtonStyle.secondary)
             button.callback = self._give_back
-            children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.ActionRow(button)]
-        children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.TextDisplay(tr(gid, "anime.footer", bot=BOT_NAME))]
+            children += [discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small), discord.ui.ActionRow(button)]
+        children += [discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small), discord.ui.TextDisplay(tr(gid, "anime.footer", bot=BOT_NAME))]
         self.add_item(discord.ui.Container(*children, accent_colour=color))
 
     async def _give_back(self, interaction: discord.Interaction):
@@ -6782,10 +6784,10 @@ def _assemble(head_text: str, st: dict, body: str, footer: str, buttons=None, av
         children.append(discord.ui.Section(head, accessory=discord.ui.Thumbnail(url)))
     if st.get("banner"):
         children.append(discord.ui.MediaGallery(discord.MediaGalleryItem(st["banner"])))
-    children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.TextDisplay(body), discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+    children += [discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small), discord.ui.TextDisplay(body), discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
                  discord.ui.TextDisplay(footer)]
     if buttons:
-        children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.ActionRow(*buttons)]
+        children += [discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small), discord.ui.ActionRow(*buttons)]
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(*children, accent_colour=st.get("color") or STEEL))
     return view
