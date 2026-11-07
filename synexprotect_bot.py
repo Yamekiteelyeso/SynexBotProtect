@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.32.5"
+BOT_VERSION = "1.32.7"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -2808,15 +2808,31 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
 
     if DM_TRANSCRIPT_ON_CLOSE or reason:
         owner = await _resolve_user(ticket["user_id"])
+        dm_embed = base_embed(f"{E('warn3', '🔒')} Your ticket was closed", f"**{ticket['type']}** · open for {duration}", STEEL)
+        if reason:
+            dm_embed.add_field(name="Reason", value=reason[:1024], inline=False)
+        sent = False
         if owner is not None:
-            dm_embed = base_embed(f"{E('warn3', '🔒')} Your ticket was closed", f"**{ticket['type']}** · open for {duration}", STEEL)
-            if reason:
-                dm_embed.add_field(name="Reason", value=reason[:1024], inline=False)
+            # 1) the styled message with the file, 2) plain embed with the file if the first one is refused
+            for attempt in (lambda: owner.send(view=as_v2(dm_embed), file=transcript_file()),
+                            lambda: owner.send(embed=dm_embed, file=transcript_file())):
+                if attachment is None:
+                    attempt = lambda: owner.send(embed=dm_embed)
+                try:
+                    await attempt()
+                    sent = True
+                    break
+                except discord.HTTPException as exc:
+                    print(f"[tickets] DM attempt to {ticket['user_id']} failed: {exc!r}")
+                if attachment is None:
+                    break
+        if not sent and isinstance(tchannel, discord.TextChannel):
             try:
-                kwargs = {"file": transcript_file()} if attachment is not None else {}
-                await owner.send(view=as_v2(dm_embed), **kwargs)
-            except discord.HTTPException as exc:
-                print(f"[tickets] could not DM transcript to {ticket['user_id']}: {exc!r}")
+                await tchannel.send(view=as_v2(notice(
+                    f"⚠️ Could not DM the transcript to {owner_mention}. Their DMs may be closed.")),
+                    allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException:
+                pass
 
     try:
         await channel.send(view=as_v2(notice("🔒 Closing this ticket in 5 seconds…")))
@@ -5580,7 +5596,23 @@ for _action in ANIME_ACTIONS:
     _register_anime_command(_action)
 
 
-AFK_STATE: dict[tuple[int, int], dict] = {}
+AFK_FILE = DATA_DIR / "afk.json"
+
+
+def _load_afk() -> dict[tuple[int, int], dict]:
+    raw = read_json(AFK_FILE, {})
+    loaded = {}
+    for key, value in raw.items():
+        gid, uid = key.split(":")
+        loaded[(int(gid), int(uid))] = value
+    return loaded
+
+
+def save_afk() -> None:
+    write_json_atomic(AFK_FILE, {f"{g}:{u}": value for (g, u), value in AFK_STATE.items()})
+
+
+AFK_STATE: dict[tuple[int, int], dict] = _load_afk()
 
 
 async def _set_afk_nick(member: discord.Member) -> bool:
@@ -5607,6 +5639,7 @@ async def _start_afk(member: discord.Member, reason: str) -> bool:
     AFK_STATE[(member.guild.id, member.id)] = {
         "since": now_ts(), "reason": reason, "nick": member.nick, "mentions": [],
     }
+    save_afk()
     return await _set_afk_nick(member)
 
 
@@ -5637,6 +5670,7 @@ async def _afk_on_message(message: discord.Message) -> None:
     is_afk_command = message.content.strip().lower().startswith(("!afk", "/afk"))
     record = None if is_afk_command else AFK_STATE.pop((gid, message.author.id), None)
     if record is not None:
+        save_afk()
         await _clear_afk_nick(message.author, record)
         away = f"<t:{record['since']}:R>"
         lines = [tr(gid, "afk.welcome", a=message.author.mention, time=away),
@@ -5660,6 +5694,7 @@ async def _afk_on_message(message: discord.Message) -> None:
         if target is None or target.bot:
             continue
         mentioned["mentions"] = (mentioned["mentions"] + [{"author": str(message.author), "url": message.jump_url}])[-25:]
+        save_afk()
         try:
             away = f"<t:{mentioned['since']}:R>"
             await message.channel.send(
@@ -6127,7 +6162,9 @@ async def _sync_prefix(member: discord.Member) -> None:
 
 
 async def _on_member_roles_prefix(before: discord.Member, after: discord.Member) -> None:
-    if before.roles != after.roles:
+    # Re-apply the prefix when the roles change, and when the member changes their own nickname
+    # (Discord drops the prefix then). Our own nickname edit ends here: the name already matches.
+    if before.roles != after.roles or before.nick != after.nick:
         await _sync_prefix(after)
 
 
