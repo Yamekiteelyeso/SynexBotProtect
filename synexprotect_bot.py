@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.28.0"
+BOT_VERSION = "1.29.0"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -119,6 +119,128 @@ COLOR_NAMES = {
     "Violet": 0x7C3AED,
     "Brown": 0x78350F,
 }
+
+def embed_children(embed: discord.Embed) -> list:
+    """The Components V2 pieces that show a classic embed: text, thumbnail and image."""
+    lines = []
+    if embed.author is not None and embed.author.name:
+        lines.append(f"-# {embed.author.name}")
+    if embed.title:
+        lines.append(f"### {embed.title}")
+    if embed.description:
+        lines.append(embed.description)
+    for field in embed.fields:
+        lines.append(f"**{field.name}**\n{field.value}" if field.name else field.value)
+    if embed.footer is not None and embed.footer.text:
+        lines.append(f"-# {embed.footer.text}")
+    text = "\n\n".join(lines) or "\u200b"
+    children = []
+    if embed.thumbnail is not None and embed.thumbnail.url:
+        children.append(discord.ui.Section(discord.ui.TextDisplay(text),
+                                           accessory=discord.ui.Thumbnail(embed.thumbnail.url)))
+    else:
+        children.append(discord.ui.TextDisplay(text))
+    if embed.image is not None and embed.image.url:
+        children += [discord.ui.Separator(), discord.ui.MediaGallery(discord.MediaGalleryItem(embed.image.url))]
+    return children
+
+
+def as_v2(embed: discord.Embed, prefix: str | None = None) -> discord.ui.LayoutView:
+    """Shows a classic embed as a Components V2 message. `prefix` is text shown above it (replaces `content`)."""
+    colour = embed.colour.value if embed.colour is not None else STEEL
+    children = embed_children(embed)
+    if prefix:
+        children.insert(0, discord.ui.TextDisplay(prefix))
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(*children, accent_colour=colour))
+    return view
+
+
+class V2Panel(discord.ui.LayoutView):
+    """Interactive Components V2 message. Keeps the classic View API (add_item, @discord.ui.button,
+    @discord.ui.select), so the panels keep their callbacks. The embed body and the components are
+    laid out in one container: body first, then the action rows."""
+
+    def __init__(self, *, timeout: float | None = 300):
+        self._pending: list = []
+        self._body: discord.Embed | None = None
+        if not hasattr(self, "label_overrides"):
+            self.label_overrides: dict[str, str] = {}
+        super().__init__(timeout=timeout)
+        self._recompose()
+
+    def add_item(self, item):
+        self._pending.append(item)
+        self._recompose()
+        return self
+
+    def set_body(self, embed: discord.Embed | None):
+        self._body = embed
+        self._recompose()
+        return self
+
+    def refresh(self):
+        self._recompose()
+        return self
+
+    def _bind(self, func, item):
+        async def callback(interaction: discord.Interaction):
+            await func(self, interaction, item)
+        return callback
+
+    def _decorated_items(self) -> list:
+        items, seen = [], set()
+        for klass in type(self).__mro__:
+            for name, value in vars(klass).items():
+                if name in seen:
+                    continue
+                seen.add(name)
+                model = getattr(value, "__discord_ui_model_type__", None)
+                if model is None:
+                    continue
+                kwargs = dict(value.__discord_ui_model_kwargs__)
+                if name in self.label_overrides:
+                    kwargs["label"] = self.label_overrides[name]
+                item = model(**kwargs)
+                item.callback = self._bind(value, item)
+                items.append(item)
+        return items
+
+    def _rows(self) -> list:
+        items = self._decorated_items() + list(self._pending)
+        selects = [i for i in items if not isinstance(i, discord.ui.Button)]
+        buttons = [i for i in items if isinstance(i, discord.ui.Button)]
+        rows = [discord.ui.ActionRow(select) for select in selects]
+        placed = [b for b in buttons if b.row is not None]
+        for row_no in sorted({b.row for b in placed}):
+            group = [b for b in placed if b.row == row_no]
+            rows += [discord.ui.ActionRow(*group[i:i + 5]) for i in range(0, len(group), 5)]
+        loose = [b for b in buttons if b.row is None]
+        rows += [discord.ui.ActionRow(*loose[i:i + 5]) for i in range(0, len(loose), 5)]
+        return rows
+
+    def _recompose(self) -> None:
+        children, accent = [], STEEL
+        if self._body is not None:
+            children += embed_children(self._body)
+            if self._body.colour is not None:
+                accent = self._body.colour.value
+        rows = self._rows()
+        if children and rows:
+            children.append(discord.ui.Separator())
+        children += rows
+        if not children:
+            children = [discord.ui.TextDisplay("\u200b")]
+        self.clear_items()
+        discord.ui.LayoutView.add_item(self, discord.ui.Container(*children, accent_colour=accent))
+
+
+def with_body(view, embed: discord.Embed | None):
+    """Puts an embed above a panel's components, so one message can show both."""
+    if isinstance(view, V2Panel):
+        view.set_body(embed)
+    return view
+
 
 def base_embed(title: str | None = None, description: str | None = None, color: int = CHARCOAL) -> discord.Embed:
     embed = discord.Embed(title=title, description=description, color=color, timestamp=datetime.now(timezone.utc))
@@ -411,7 +533,7 @@ def build_avatar(user: discord.abc.User) -> tuple[discord.Embed, discord.ui.View
     embed = base_embed(f"{E(['community', 'members'], '🖼️')} {user.display_name}", f"Avatar of {user.mention}", STEEL)
     embed.set_thumbnail(url=user.display_avatar.replace(size=256).url)
     embed.set_image(url=url)
-    view = discord.ui.View()
+    view = V2Panel()
     view.add_item(discord.ui.Button(label="Download", url=url, style=discord.ButtonStyle.link, emoji="⬇️"))
     return embed, view
 
@@ -477,21 +599,21 @@ def _find_rule(guild_id: int, emoji: discord.PartialEmoji, message_id: int) -> d
 async def removeemojirole(interaction: discord.Interaction, emoji: str, message_id: str | None = None):
     key = emoji_key_from_input(emoji)
     if key is None:
-        return await interaction.response.send_message(embed=error_notice("Invalid emoji."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(error_notice("Invalid emoji.")), ephemeral=True)
     msg_id = None
     if message_id:
         try:
             msg_id = int(message_id.strip())
         except ValueError:
-            return await interaction.response.send_message(embed=error_notice("Invalid message ID."), ephemeral=True)
+            return await interaction.response.send_message(view=as_v2(error_notice("Invalid message ID.")), ephemeral=True)
     rules = reaction_roles.get(str(interaction.guild_id), [])
     before = len(rules)
     rules[:] = [r for r in rules if not (r["emoji"] == key and (msg_id is None or r["message_id"] == msg_id))]
     save_reaction_roles()
     removed = before - len(rules)
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} Removed {removed} rule(s) for {emoji}." if removed
-                     else f"No rule found for {emoji}."),
+        view=as_v2(notice(f"{E('true', '✅')} Removed {removed} rule(s) for {emoji}." if removed
+                     else f"No rule found for {emoji}.")),
         ephemeral=True,
     )
 
@@ -553,7 +675,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
     text = f"{E('true', '✅')} Role **{role.name}** granted."
     try:
-        await member.send(embed=notice(text))
+        await member.send(view=as_v2(notice(text)))
     except discord.HTTPException:
         channel = bot.get_channel(payload.channel_id)
         if channel:
@@ -583,9 +705,9 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     embed = error_notice(text)
     try:
         if interaction.response.is_done():
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send(view=as_v2(embed), ephemeral=True)
         else:
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(view=as_v2(embed), ephemeral=True)
     except discord.HTTPException:
         pass  # the interaction expired or was already answered; nothing left to tell the user
 
@@ -597,15 +719,15 @@ async def bot_say(interaction: discord.Interaction, message: str, channel: disco
     target = channel or interaction.channel
     if not target.permissions_for(interaction.user).send_messages:
         return await interaction.response.send_message(
-            embed=error_notice("You can't send messages in that channel."), ephemeral=True)
+            view=as_v2(error_notice("You can't send messages in that channel.")), ephemeral=True)
     if not target.permissions_for(interaction.guild.me).send_messages:
         return await interaction.response.send_message(
-            embed=error_notice("I can't send messages in that channel."), ephemeral=True)
+            view=as_v2(error_notice("I can't send messages in that channel.")), ephemeral=True)
     if len(message) > 2000:
         return await interaction.response.send_message(
-            embed=error_notice("Messages are limited to 2000 characters."), ephemeral=True)
+            view=as_v2(error_notice("Messages are limited to 2000 characters.")), ephemeral=True)
     await target.send(message, allowed_mentions=discord.AllowedMentions(everyone=False, roles=False))
-    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Message sent to {target.mention}."), ephemeral=True)
+    await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} Message sent to {target.mention}.")), ephemeral=True)
 
 @bot.tree.command(name="embed", description="Send a custom embed. Every field is optional.")
 @app_commands.describe(
@@ -632,13 +754,13 @@ async def embed_cmd(
         embed_color = parse_color(color)
     except ValueError:
         return await interaction.response.send_message(
-            embed=error_notice("Invalid color. Pick a color name or use a 6-digit hex value such as `2B2D31`."),
+            view=as_v2(error_notice("Invalid color. Pick a color name or use a 6-digit hex value such as `2B2D31`.")),
             ephemeral=True,
         )
 
     if image and not (image.content_type or "").startswith("image/"):
         return await interaction.response.send_message(
-            embed=error_notice("The attached file must be an image."), ephemeral=True
+            view=as_v2(error_notice("The attached file must be an image.")), ephemeral=True
         )
 
     embed = discord.Embed(title=title, description=description, color=embed_color)
@@ -652,8 +774,8 @@ async def embed_cmd(
     if not (title or description or image or image_url):
         embed.description = "​"
 
-    await interaction.channel.send(embed=embed)
-    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Embed sent."), ephemeral=True)
+    await interaction.channel.send(view=as_v2(embed))
+    await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} Embed sent.")), ephemeral=True)
 
 @bot.tree.command(name="emojisteal", description="Copy a custom emoji from another server into this one.")
 @app_commands.describe(
@@ -679,7 +801,7 @@ async def emojisteal(interaction: discord.Interaction, emoji: str, name: str | N
 
     if partial is None:
         return await interaction.followup.send(
-            embed=error_notice("I couldn't find that emoji. Paste the emoji itself, or use a name from a server the bot is in."),
+            view=as_v2(error_notice("I couldn't find that emoji. Paste the emoji itself, or use a name from a server the bot is in.")),
             ephemeral=True,
         )
 
@@ -704,12 +826,12 @@ async def emojisteal(interaction: discord.Interaction, emoji: str, name: str | N
         )
     except discord.HTTPException as exc:
         return await interaction.followup.send(
-            embed=error_notice(f"Could not add the emoji: {exc.text or 'the server may be full.'}"),
+            view=as_v2(error_notice(f"Could not add the emoji: {exc.text or 'the server may be full.'}")),
             ephemeral=True,
         )
 
     embed = base_embed(f"{E(['check', 'success'], '✅')} Emoji added", f"{created}  ·  `:{created.name}:`", STEEL)
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    await interaction.followup.send(view=as_v2(embed), ephemeral=True)
 
 async def _find_message(guild: discord.Guild, message_id: int, prefer: discord.abc.Messageable | None):
     if prefer is not None:
@@ -769,19 +891,19 @@ async def addemojirole(
         try:
             msg_id = int(message_id.strip())
         except ValueError:
-            return await interaction.response.send_message(embed=error_notice("Invalid message ID."), ephemeral=True)
+            return await interaction.response.send_message(view=as_v2(error_notice("Invalid message ID.")), ephemeral=True)
 
     await interaction.response.defer(ephemeral=True)
     error = await _apply_reaction_role(interaction.guild, emoji, role, None, msg_id, prefer=interaction.channel)
     if error:
-        return await interaction.followup.send(embed=error_notice(error), ephemeral=True)
+        return await interaction.followup.send(view=as_v2(error_notice(error)), ephemeral=True)
 
     scope = f"message `{msg_id}`" if msg_id else "any message"
     embed = base_embed(f"{E(['check', 'success'], '🏷️')} Reaction role saved", color=STEEL)
     embed.add_field(name="Emoji", value=emoji, inline=True)
     embed.add_field(name="Role", value=role.mention, inline=True)
     embed.add_field(name="Works on", value=scope, inline=False)
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    await interaction.followup.send(view=as_v2(embed), ephemeral=True)
 
 @bot.command(name="addemojirole")
 @commands.has_permissions(manage_roles=True)
@@ -790,12 +912,12 @@ async def addemojirole_prefix(ctx: commands.Context, emoji: str, role: discord.R
     ref = ctx.message.reference
     target = ref.resolved if ref and isinstance(ref.resolved, discord.Message) else None
     if target is None:
-        return await ctx.send(embed=error_notice("Reply to the message you want, then type `!addemojirole <emoji> @role`."), delete_after=10)
+        return await ctx.send(view=as_v2(error_notice("Reply to the message you want, then type `!addemojirole <emoji> @role`.")), delete_after=10)
 
     error = await _apply_reaction_role(ctx.guild, emoji, role, target, target.id)
     if error:
-        return await ctx.send(embed=error_notice(error), delete_after=12)
-    await ctx.send(embed=notice(f"{E('true', '✅')} {emoji} now gives {role.mention} on that message."), delete_after=8)
+        return await ctx.send(view=as_v2(error_notice(error)), delete_after=12)
+    await ctx.send(view=as_v2(notice(f"{E('true', '✅')} {emoji} now gives {role.mention} on that message.")), delete_after=8)
 
 @bot.tree.command(name="ping", description="Show the bot's current latency.")
 async def ping(interaction: discord.Interaction):
@@ -819,12 +941,12 @@ async def server_prefix(ctx: commands.Context):
 @app_commands.describe(member="The user to inspect (default: you)")
 @app_commands.guild_only()
 async def userinfo(interaction: discord.Interaction, member: discord.Member | None = None):
-    await interaction.response.send_message(embed=build_userinfo_embed(member or interaction.user))
+    await interaction.response.send_message(view=as_v2(build_userinfo_embed(member or interaction.user)))
 
 @bot.command(name="user")
 @commands.guild_only()
 async def user_prefix(ctx: commands.Context, member: Optional[discord.Member] = None):
-    await ctx.send(embed=build_userinfo_embed(member or ctx.author))
+    await ctx.send(view=as_v2(build_userinfo_embed(member or ctx.author)))
 
 @bot.tree.command(name="botinfo", description="Show statistics about the bot.")
 async def botinfo(interaction: discord.Interaction):
@@ -838,12 +960,12 @@ async def botinfo_prefix(ctx: commands.Context):
 @app_commands.describe(member="The user whose avatar to show (default: you)")
 async def avatar(interaction: discord.Interaction, member: discord.User | None = None):
     embed, view = build_avatar(member or interaction.user)
-    await interaction.response.send_message(embed=embed, view=view)
+    await interaction.response.send_message(view=with_body(view, embed))
 
 @bot.command(name="avatar")
 async def avatar_prefix(ctx: commands.Context, member: Optional[discord.User] = None):
     embed, view = build_avatar(member or ctx.author)
-    await ctx.send(embed=embed, view=view)
+    await ctx.send(view=with_body(view, embed))
 
 PUBLIC_COMMANDS = [
     ("ping", "Check the bot's response time and status.", "/ping  ·  !ping"),
@@ -952,6 +1074,7 @@ class CommandSelect(discord.ui.Select):
         self.owner_id = owner_id
         self.entries = {e[0]: e for e in entries}
         self.admin = admin
+        self.panel = None
         options = [discord.SelectOption(label=f"/{e[0]}", description=e[1][:100], value=e[0]) for e in entries]
         super().__init__(placeholder="Choose a command to view its details…", options=options)
 
@@ -964,13 +1087,15 @@ class CommandSelect(discord.ui.Select):
         embed.add_field(name="Usage", value=f"`{entry[2]}`", inline=False)
         if self.admin:
             embed.add_field(name="Required permission", value=entry[3], inline=True)
-        await interaction.response.edit_message(embed=embed, view=self.view)
+        await interaction.response.edit_message(view=with_body(self.panel, embed))
 
-class CommandView(discord.ui.View):
+class CommandView(V2Panel):
     def __init__(self, owner_id: int, entries: list[tuple], admin: bool = False):
         super().__init__(timeout=180)
         for start in range(0, len(entries), 25):
-            self.add_item(CommandSelect(owner_id, entries[start:start + 25], admin))
+            select = CommandSelect(owner_id, entries[start:start + 25], admin)
+            select.panel = self
+            self.add_item(select)
 
 def _command_label(name: str) -> str:
     return f"!{name}" if name in ANIME_ACTIONS else f"/{name}"
@@ -1046,20 +1171,19 @@ def build_helpadmin_embed() -> discord.Embed:
 @bot.tree.command(name="help", description="Show the list of available commands.")
 async def help_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(
-        embed=build_help_embed(), view=CommandView(interaction.user.id, PUBLIC_COMMANDS), ephemeral=True
+        view=with_body(CommandView(interaction.user.id, PUBLIC_COMMANDS), build_help_embed()), ephemeral=True
     )
 
 @bot.command(name="help")
 async def help_prefix(ctx: commands.Context):
-    await ctx.send(embed=build_help_embed(), view=CommandView(ctx.author.id, PUBLIC_COMMANDS))
+    await ctx.send(view=with_body(CommandView(ctx.author.id, PUBLIC_COMMANDS), build_help_embed()))
 
 @bot.tree.command(name="helpadmin", description="Show the administrator command panel.")
 @app_commands.default_permissions(manage_messages=True)
 @app_commands.guild_only()
 async def helpadmin(interaction: discord.Interaction):
     await interaction.response.send_message(
-        embed=build_helpadmin_embed(),
-        view=CommandView(interaction.user.id, ADMIN_COMMANDS, admin=True),
+        view=with_body(CommandView(interaction.user.id, ADMIN_COMMANDS, admin=True), build_helpadmin_embed()),
         ephemeral=True,
     )
 
@@ -1067,15 +1191,16 @@ async def helpadmin(interaction: discord.Interaction):
 @commands.guild_only()
 @commands.has_permissions(manage_messages=True)
 async def helpadmin_prefix(ctx: commands.Context):
-    await ctx.send(embed=build_helpadmin_embed(), view=CommandView(ctx.author.id, ADMIN_COMMANDS, admin=True))
+    await ctx.send(view=with_body(CommandView(ctx.author.id, ADMIN_COMMANDS, admin=True), build_helpadmin_embed()))
 
-class PollView(discord.ui.View):
+class PollView(V2Panel):
 
     def __init__(self, question: str, options: list[str]):
         super().__init__(timeout=None)
         self.question = question
         self.options = options
         self.user_choice: dict[int, int] = {}
+        self._buttons: list = []
 
         for index, label in enumerate(options):
             button = discord.ui.Button(
@@ -1085,6 +1210,7 @@ class PollView(discord.ui.View):
                 emoji=LETTERS[index],
             )
             button.callback = self._make_vote_callback(index)
+            self._buttons.append(button)
             self.add_item(button)
 
     def counts(self) -> list[int]:
@@ -1097,7 +1223,7 @@ class PollView(discord.ui.View):
         return f"{self.options[index][:50]} · {self.counts()[index]}"
 
     def _refresh_buttons(self) -> None:
-        for index, item in enumerate(self.children):
+        for index, item in enumerate(self._buttons):
             item.label = self._button_label(index)
 
     def _make_vote_callback(self, index: int):
@@ -1108,7 +1234,7 @@ class PollView(discord.ui.View):
             else:
                 self.user_choice[user_id] = index
             self._refresh_buttons()
-            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+            await interaction.response.edit_message(view=with_body(self, self.build_embed()))
         return callback
 
     def build_embed(self) -> discord.Embed:
@@ -1147,7 +1273,7 @@ async def poll(
 ):
     options = [o.strip() for o in (option1, option2, option3, option4, option5) if o and o.strip()]
     view = PollView(question, options)
-    await interaction.response.send_message(embed=view.build_embed(), view=view)
+    await interaction.response.send_message(view=with_body(view, view.build_embed()))
 
 async def _finish_timer(channel: discord.abc.Messageable, user: discord.abc.User, text: str, delay: int) -> None:
     await asyncio.sleep(delay)
@@ -1155,11 +1281,11 @@ async def _finish_timer(channel: discord.abc.Messageable, user: discord.abc.User
     done.set_thumbnail(url=user.display_avatar.url)
     done.add_field(name="Set by", value=user.mention, inline=True)
     try:
-        await channel.send(content=user.mention, embed=done, allowed_mentions=discord.AllowedMentions(users=True))
+        await channel.send(view=as_v2(done, prefix=user.mention), allowed_mentions=discord.AllowedMentions(users=True))
     except discord.HTTPException as exc:
         print(f"[timer] could not post in channel: {exc}")
     try:
-        await user.send(embed=done)
+        await user.send(view=as_v2(done))
     except discord.HTTPException as exc:
         print(f"[timer] could not send DM: {exc}")
 
@@ -1170,7 +1296,7 @@ async def _start_timer(channel: discord.abc.Messageable, user: discord.abc.User,
     embed.add_field(name="Set by", value=user.mention, inline=True)
     embed.add_field(name="Ends", value=f"<t:{ends}:R> · <t:{ends}:f>", inline=True)
     try:
-        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(view=as_v2(embed), allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException as exc:
         print(f"[timer] could not post timer: {exc}")
         return False
@@ -1193,12 +1319,12 @@ async def timer_cmd(interaction: discord.Interaction, time: str, reminder: str):
     seconds = _parse_timer_time(time)
     if seconds is None:
         return await interaction.response.send_message(
-            embed=error_notice("Use a time between 5 seconds and 30 days, e.g. `10m`, `2h`, `1d`."), ephemeral=True
+            view=as_v2(error_notice("Use a time between 5 seconds and 30 days, e.g. `10m`, `2h`, `1d`.")), ephemeral=True
         )
     if not await _start_timer(interaction.channel, interaction.user, seconds, reminder):
-        return await interaction.response.send_message(embed=error_notice("I couldn't post the timer here."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(error_notice("I couldn't post the timer here.")), ephemeral=True)
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} Timer set for **{fmt_seconds(seconds)}**. Everyone can see it here."), ephemeral=True
+        view=as_v2(notice(f"{E('true', '✅')} Timer set for **{fmt_seconds(seconds)}**. Everyone can see it here.")), ephemeral=True
     )
 
 @bot.command(name="timer")
@@ -1206,11 +1332,11 @@ async def timer_cmd(interaction: discord.Interaction, time: str, reminder: str):
 async def timer_prefix(ctx: commands.Context, *, args: str = ""):
     parts = args.split(maxsplit=1)
     if len(parts) < 2:
-        return await ctx.send(embed=error_notice("Usage: `!timer <time> <reminder>`, e.g. `!timer 10m Check the oven`"))
+        return await ctx.send(view=as_v2(error_notice("Usage: `!timer <time> <reminder>`, e.g. `!timer 10m Check the oven`")))
 
     seconds = _parse_timer_time(parts[0])
     if seconds is None:
-        return await ctx.send(embed=error_notice("Use a time between 5 seconds and 30 days, e.g. `10m`, `2h`, `1d`."))
+        return await ctx.send(view=as_v2(error_notice("Use a time between 5 seconds and 30 days, e.g. `10m`, `2h`, `1d`.")))
 
     try:
         await ctx.message.delete()
@@ -1218,7 +1344,7 @@ async def timer_prefix(ctx: commands.Context, *, args: str = ""):
         pass
 
     if not await _start_timer(ctx.channel, ctx.author, seconds, parts[1]):
-        await ctx.send(embed=error_notice("I couldn't post the timer here."), delete_after=8)
+        await ctx.send(view=as_v2(error_notice("I couldn't post the timer here.")), delete_after=8)
 
 import random
 
@@ -1340,14 +1466,14 @@ async def translate_prefix(ctx: commands.Context, language: str, *, text: str | 
             except discord.HTTPException:
                 source = None
         if source is None:
-            return await ctx.reply(embed=error_notice(tr(gid, "translate.not_found")), mention_author=False)
+            return await ctx.reply(view=as_v2(error_notice(tr(gid, "translate.not_found"))), mention_author=False)
     source_text = text.strip() if text and text.strip() else (_source_text(source) if source else "")
     if not source_text:
-        return await ctx.reply(embed=error_notice(tr(gid, "translate.need_text")), mention_author=False)
+        return await ctx.reply(view=as_v2(error_notice(tr(gid, "translate.need_text"))), mention_author=False)
     code = _lang_code(language)
     translated = await _translate_text(source_text, code)
     if translated is None:
-        return await ctx.reply(embed=error_notice(tr(gid, "translate.failed")), mention_author=False)
+        return await ctx.reply(view=as_v2(error_notice(tr(gid, "translate.failed"))), mention_author=False)
     if source is not None:
         for start in range(0, len(translated), 2000):
             if start == 0:
@@ -1356,7 +1482,7 @@ async def translate_prefix(ctx: commands.Context, language: str, *, text: str | 
             else:
                 await ctx.send(translated[start:start + 2000], allowed_mentions=discord.AllowedMentions.none())
         return
-    await ctx.reply(embed=_translation_embed(source_text, translated, code), mention_author=False)
+    await ctx.reply(view=as_v2(_translation_embed(source_text, translated, code)), mention_author=False)
 
 
 @bot.tree.command(name="translate", description="Translate a text, or a message by its ID, into another language.")
@@ -1371,21 +1497,21 @@ async def translate(interaction: discord.Interaction, language: str, text: str |
             source = await interaction.channel.fetch_message(int(message_id.strip()))
         except (ValueError, discord.HTTPException):
             return await interaction.response.send_message(
-                embed=error_notice(tr(gid, "translate.not_found")), ephemeral=True)
+                view=as_v2(error_notice(tr(gid, "translate.not_found"))), ephemeral=True)
     if not text and source is None:
         return await interaction.response.send_message(
-            embed=error_notice(tr(gid, "translate.need_input")), ephemeral=True)
+            view=as_v2(error_notice(tr(gid, "translate.need_input"))), ephemeral=True)
     source_text = text.strip() if text and text.strip() else _source_text(source)
     if not source_text:
         return await interaction.response.send_message(
-            embed=error_notice(tr(gid, "translate.need_text")), ephemeral=True)
+            view=as_v2(error_notice(tr(gid, "translate.need_text"))), ephemeral=True)
     private = source is None
     await interaction.response.defer(ephemeral=private)
     code = _lang_code(language)
     translated = await _translate_text(source_text, code)
     if translated is None:
-        return await interaction.followup.send(embed=error_notice(tr(gid, "translate.failed")), ephemeral=True)
-    await interaction.followup.send(embed=_translation_embed(source_text, translated, code), ephemeral=private)
+        return await interaction.followup.send(view=as_v2(error_notice(tr(gid, "translate.failed"))), ephemeral=True)
+    await interaction.followup.send(view=as_v2(_translation_embed(source_text, translated, code)), ephemeral=private)
 
 
 @translate.autocomplete("language")
@@ -1468,7 +1594,7 @@ def build_giveaway_layout(data: dict) -> discord.ui.LayoutView:
 async def _join_callback(interaction: discord.Interaction):
     data = giveaways.get(interaction.message.id)
     if not data or data["ended"]:
-        return await interaction.response.send_message(embed=notice("This giveaway has ended."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(notice("This giveaway has ended.")), ephemeral=True)
 
     uid = interaction.user.id
     if uid in data["entries"]:
@@ -1480,12 +1606,12 @@ async def _join_callback(interaction: discord.Interaction):
 
     request_giveaway_save()
     await interaction.response.edit_message(view=build_giveaway_layout(data))
-    await interaction.followup.send(embed=notice(msg), ephemeral=True)
+    await interaction.followup.send(view=as_v2(notice(msg)), ephemeral=True)
 
 async def _entries_callback(interaction: discord.Interaction):
     data = giveaways.get(interaction.message.id)
     if not data:
-        return await interaction.response.send_message(embed=notice("This giveaway no longer exists."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(notice("This giveaway no longer exists.")), ephemeral=True)
 
     entrants = list(data["entries"])
     count = len(entrants)
@@ -1499,7 +1625,7 @@ async def _entries_callback(interaction: discord.Interaction):
         description=f"**{count:,}** member{'s' if count != 1 else ''} entered **{data['prize']}**.\n\n{body}",
         color=SLATE,
     )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(view=as_v2(embed), ephemeral=True)
 
 def _new_giveaway_data(host_id: int, channel_id: int, prize: str, seconds: int, winners: int, reclaim: int) -> dict:
     return {
@@ -1759,17 +1885,17 @@ def _make_claim_callback(gid: int, uid: int):
     async def claim(interaction: discord.Interaction):
         if interaction.user.id != uid:
             return await interaction.response.send_message(
-                embed=error_notice("Only the winner can claim this prize."), ephemeral=True
+                view=as_v2(error_notice("Only the winner can claim this prize.")), ephemeral=True
             )
         data = giveaways.get(gid)
         info = data["announce"].get(uid) if data else None
         if info is None or info["status"] != "pending" or uid not in data["winners_list"]:
             return await interaction.response.send_message(
-                embed=error_notice("This prize can no longer be claimed."), ephemeral=True
+                view=as_v2(error_notice("This prize can no longer be claimed.")), ephemeral=True
             )
         if now_ts() > info["deadline"]:
             return await interaction.response.send_message(
-                embed=error_notice("The claim time has expired."), ephemeral=True
+                view=as_v2(error_notice("The claim time has expired.")), ephemeral=True
             )
 
         data["claimed"].add(uid)
@@ -1780,7 +1906,7 @@ def _make_claim_callback(gid: int, uid: int):
         channel = await _open_giveaway_ticket(interaction.guild, interaction.user, data["prize"])
         if channel is not None:
             await interaction.followup.send(
-                embed=notice(f"{E('true', '✅')} Your prize ticket is ready: {channel.mention}"), ephemeral=True
+                view=as_v2(notice(f"{E('true', '✅')} Your prize ticket is ready: {channel.mention}")), ephemeral=True
             )
 
     return claim
@@ -1879,9 +2005,9 @@ async def _finish_giveaway(gid: int, count: int | None = None) -> list[int]:
         if channel is None:
             return chosen
         if not chosen:
-            await channel.send(embed=discord.Embed(
+            await channel.send(view=as_v2(discord.Embed(
                 title="🎉  Giveaway ended", description="No valid entries were found.", color=STEEL
-            ))
+            )))
             return chosen
         for uid in chosen:
             await _announce_winner(gid, uid)
@@ -1946,11 +2072,11 @@ async def giveaway_create(
     reclaim = _valid_seconds(timereclaim, 60, 7 * 86400)
     if seconds is None:
         return await interaction.response.send_message(
-            embed=error_notice("Use a duration between 10 seconds and 30 days, e.g. `10h` or `1d`."), ephemeral=True
+            view=as_v2(error_notice("Use a duration between 10 seconds and 30 days, e.g. `10h` or `1d`.")), ephemeral=True
         )
     if reclaim is None:
         return await interaction.response.send_message(
-            embed=error_notice("Use a claim time between 1 minute and 7 days, e.g. `30m` or `1h`."), ephemeral=True
+            view=as_v2(error_notice("Use a claim time between 1 minute and 7 days, e.g. `30m` or `1h`.")), ephemeral=True
         )
 
     data = _new_giveaway_data(interaction.user.id, interaction.channel_id, prize, seconds, winners, reclaim)
@@ -1965,13 +2091,13 @@ async def giveaway_end(interaction: discord.Interaction, message_id: str):
     gid = _parse_message_id(message_id)
     data = giveaways.get(gid) if gid else None
     if not data:
-        return await interaction.response.send_message(embed=error_notice("No giveaway found with that ID."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(error_notice("No giveaway found with that ID.")), ephemeral=True)
     if data["ended"]:
         return await interaction.response.send_message(
-            embed=error_notice("This giveaway has already ended. Use `/giveaway reroll` instead."), ephemeral=True
+            view=as_v2(error_notice("This giveaway has already ended. Use `/giveaway reroll` instead.")), ephemeral=True
         )
 
-    await interaction.response.send_message(embed=notice("Ending giveaway…"), ephemeral=True)
+    await interaction.response.send_message(view=as_v2(notice("Ending giveaway…")), ephemeral=True)
     await _finish_giveaway(gid)
 
 @giveaway_group.command(name="reroll", description="Reroll the winners who have not claimed their prize.")
@@ -1980,12 +2106,12 @@ async def giveaway_end(interaction: discord.Interaction, message_id: str):
 async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
     gid = _parse_message_id(message_id)
     if gid is None:
-        return await interaction.response.send_message(embed=error_notice("Invalid message ID."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(error_notice("Invalid message ID.")), ephemeral=True)
 
     error = await _reroll(gid)
     if error:
-        return await interaction.response.send_message(embed=error_notice(error), ephemeral=True)
-    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} New winner selected."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(error_notice(error)), ephemeral=True)
+    await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} New winner selected.")), ephemeral=True)
 
 def parse_giveaway_args(args: str) -> tuple[str, str, int, str] | None:
     t = args.split()
@@ -2014,17 +2140,17 @@ async def giveway_prefix(ctx: commands.Context, *, args: str = ""):
     usage = "Usage: `!giveway <prize> <duration> [winners] [timereclaim]`, e.g. `!giveway Nitro 10h 1 1h`"
     parsed = parse_giveaway_args(args)
     if parsed is None:
-        return await ctx.send(embed=error_notice(usage))
+        return await ctx.send(view=as_v2(error_notice(usage)))
 
     prize, duration, winners, reclaim_text = parsed
     seconds = _valid_seconds(duration, 10, 30 * 86400)
     reclaim = _valid_seconds(reclaim_text, 60, 7 * 86400)
     if seconds is None:
-        return await ctx.send(embed=error_notice("Use a duration between 10 seconds and 30 days, e.g. `10h` or `1d`."))
+        return await ctx.send(view=as_v2(error_notice("Use a duration between 10 seconds and 30 days, e.g. `10h` or `1d`.")))
     if reclaim is None:
-        return await ctx.send(embed=error_notice("Use a claim time between 1 minute and 7 days, e.g. `30m` or `1h`."))
+        return await ctx.send(view=as_v2(error_notice("Use a claim time between 1 minute and 7 days, e.g. `30m` or `1h`.")))
     if not 1 <= winners <= 20:
-        return await ctx.send(embed=error_notice("Winners must be between 1 and 20."))
+        return await ctx.send(view=as_v2(error_notice("Winners must be between 1 and 20.")))
 
     data = _new_giveaway_data(ctx.author.id, ctx.channel.id, prize, seconds, winners, reclaim)
     message = await ctx.send(view=build_giveaway_layout(data))
@@ -2036,12 +2162,12 @@ async def giveway_prefix(ctx: commands.Context, *, args: str = ""):
 async def reroll_prefix(ctx: commands.Context):
     ref = ctx.message.reference
     if ref is None or ref.message_id is None:
-        return await ctx.send(embed=error_notice("Reply to a giveaway message with `!reroll`."))
+        return await ctx.send(view=as_v2(error_notice("Reply to a giveaway message with `!reroll`.")))
 
     error = await _reroll(ref.message_id)
     if error:
-        return await ctx.send(embed=error_notice(error))
-    await ctx.send(embed=notice(f"{E('true', '✅')} New winner selected."))
+        return await ctx.send(view=as_v2(error_notice(error)))
+    await ctx.send(view=as_v2(notice(f"{E('true', '✅')} New winner selected.")))
 
 TICKET_CATEGORY_ID: int | None = None
 LOGS_CHANNEL_ID: int | None = None
@@ -2148,12 +2274,12 @@ async def _log(guild: discord.Guild, embed: discord.Embed) -> None:
     channel = guild.get_channel(LOGS_CHANNEL_ID) if LOGS_CHANNEL_ID else None
     if channel is not None:
         try:
-            await channel.send(embed=embed)
+            await channel.send(view=as_v2(embed))
         except discord.HTTPException:
             pass
 
-def build_panel_view() -> discord.ui.View:
-    view = discord.ui.View(timeout=None)
+def build_panel_view() -> V2Panel:
+    view = V2Panel(timeout=None)
     view.add_item(discord.ui.Select(
         custom_id="tk:select",
         placeholder="Select a ticket category…",
@@ -2170,7 +2296,7 @@ def build_panel_embed() -> discord.Embed:
     return discord.Embed(description=panel_text(), color=PANEL_COLOR)
 
 async def post_panel(channel: discord.abc.Messageable, guild: discord.Guild) -> discord.Message:
-    message = await channel.send(embed=build_panel_embed(), view=build_panel_view())
+    message = await channel.send(view=with_body(build_panel_view(), build_panel_embed()))
 
     old = ticket_data["panel"]
     if old["channel_id"] and old["message_id"]:
@@ -2280,13 +2406,13 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
     guild = interaction.guild
     ttype = ticket_type(key)
     if ttype is None:
-        return await interaction.response.send_message(embed=error_notice("That ticket type no longer exists."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(error_notice("That ticket type no longer exists.")), ephemeral=True)
 
     mine = [cid for cid, t in ticket_data["open"].items() if t["user_id"] == interaction.user.id]
     if len(mine) >= MAX_OPEN_PER_USER:
         links = " ".join(f"<#{cid}>" for cid in mine)
         return await interaction.response.send_message(
-            embed=error_notice(f"You already have an open ticket: {links}"), ephemeral=True
+            view=as_v2(error_notice(f"You already have an open ticket: {links}")), ephemeral=True
         )
 
     await interaction.response.defer(ephemeral=True)
@@ -2318,7 +2444,7 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
     except discord.HTTPException as exc:
         ticket_data["counter"] -= 1
         return await interaction.followup.send(
-            embed=error_notice(f"I couldn't create the ticket: {exc.text or 'missing permissions.'}"), ephemeral=True
+            view=as_v2(error_notice(f"I couldn't create the ticket: {exc.text or 'missing permissions.'}")), ephemeral=True
         )
 
     ticket = {
@@ -2363,7 +2489,7 @@ async def _open_ticket(interaction: discord.Interaction, key: str) -> None:
     await _log(guild, log)
 
     await interaction.followup.send(
-        embed=notice(f"{E('true', '✅')} Your ticket is ready: {channel.mention}"), ephemeral=True
+        view=as_v2(notice(f"{E('true', '✅')} Your ticket is ready: {channel.mention}")), ephemeral=True
     )
 
 from html import escape as html_escape
@@ -2645,7 +2771,7 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
         if tchannel is not None:
             try:
                 await tchannel.send(
-                    embed=base_embed("📄 Transcript", f"{channel.name} · opened by {owner_mention}", STEEL),
+                    view=as_v2(base_embed("📄 Transcript", f"{channel.name} · opened by {owner_mention}", STEEL)),
                     file=transcript_file(),
                 )
             except discord.HTTPException:
@@ -2669,12 +2795,12 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
                 dm_embed.add_field(name="Reason", value=reason[:1024], inline=False)
             try:
                 kwargs = {"file": transcript_file()} if html_data is not None else {}
-                await owner.send(embed=dm_embed, **kwargs)
+                await owner.send(view=as_v2(dm_embed), **kwargs)
             except discord.HTTPException:
                 pass
 
     try:
-        await channel.send(embed=notice("🔒 Closing this ticket in 5 seconds…"))
+        await channel.send(view=as_v2(notice("🔒 Closing this ticket in 5 seconds…")))
     except discord.HTTPException:
         pass
     await asyncio.sleep(5)
@@ -2727,7 +2853,7 @@ def _member_line(uid: str, people: dict[str, str]) -> str:
 @app_commands.guild_only()
 async def tickets_log(interaction: discord.Interaction, number: int | None = None):
     if not is_staff(interaction.user):
-        return await interaction.response.send_message(embed=error_notice("Only staff can use this."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(error_notice("Only staff can use this.")), ephemeral=True)
     if number is None:
         key = str(interaction.channel_id)
     else:
@@ -2735,7 +2861,7 @@ async def tickets_log(interaction: discord.Interaction, number: int | None = Non
         if key is None:
             key = next((cid for cid, r in ticket_history.items() if r.get("number") == number), None)
     if key is None or (key not in ticket_data["open"] and key not in ticket_history):
-        return await interaction.response.send_message(embed=error_notice("I couldn't find that ticket."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(error_notice("I couldn't find that ticket.")), ephemeral=True)
 
     await interaction.response.defer()
     if key in ticket_data["open"]:
@@ -2799,7 +2925,7 @@ async def tickets_log(interaction: discord.Interaction, number: int | None = Non
 load_ticket_history()
 
 
-class ConfirmView(discord.ui.View):
+class ConfirmView(V2Panel):
     def __init__(self, on_confirm, label: str = "Confirm", style: discord.ButtonStyle = discord.ButtonStyle.danger):
         super().__init__(timeout=60)
         self.on_confirm = on_confirm
@@ -2828,12 +2954,12 @@ class CloseReasonModal(discord.ui.Modal):
                             reason=str(self.reason.value).strip())
 
 
-class CloseChoiceView(discord.ui.View):
+class CloseChoiceView(V2Panel):
     def __init__(self, gid=0):
         super().__init__(timeout=120)
         self.gid = gid
-        self.children[0].label = tr(gid, "close.now")
-        self.children[1].label = tr(gid, "close.with_reason")
+        self.label_overrides = {"close_now": tr(gid, "close.now"), "close_with_reason": tr(gid, "close.with_reason")}
+        self.refresh()
 
     @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, emoji="🔒")
     async def close_now(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2845,35 +2971,34 @@ class CloseChoiceView(discord.ui.View):
         await interaction.response.send_modal(CloseReasonModal(self.gid))
 
 
-class CloseConfirmView(discord.ui.View):
+class CloseConfirmView(V2Panel):
     def __init__(self, gid=0):
         super().__init__(timeout=60)
         self.gid = gid
-        self.children[0].label = tr(gid, "close.yes")
-        self.children[1].label = tr(gid, "close.no")
+        self.label_overrides = {"yes": tr(gid, "close.yes"), "no": tr(gid, "close.no")}
+        self.refresh()
 
     @discord.ui.button(label="Yes", style=discord.ButtonStyle.danger)
     async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=notice(tr(self.gid, "close.choose")), view=CloseChoiceView(self.gid)
+            view=with_body(CloseChoiceView(self.gid), notice(tr(self.gid, "close.choose")))
         )
 
     @discord.ui.button(label="No", style=discord.ButtonStyle.secondary)
     async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(embed=notice(tr(self.gid, "close.cancelled")), view=None)
+        await interaction.response.edit_message(view=as_v2(notice(tr(self.gid, "close.cancelled"))))
 
 
 async def _request_close(interaction: discord.Interaction) -> None:
     ticket = ticket_data["open"].get(str(interaction.channel_id))
     if ticket is None:
-        return await interaction.response.send_message(embed=error_notice("This isn't a ticket channel."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(error_notice("This isn't a ticket channel.")), ephemeral=True)
     if not can_manage_ticket(interaction.user, ticket):
         return await interaction.response.send_message(
-            embed=error_notice("Only the ticket owner or staff can close this ticket."), ephemeral=True
+            view=as_v2(error_notice("Only the ticket owner or staff can close this ticket.")), ephemeral=True
         )
     await interaction.response.send_message(
-        embed=notice(tr(interaction.guild_id, "close.confirm")),
-        view=CloseConfirmView(interaction.guild_id),
+        view=with_body(CloseConfirmView(interaction.guild_id), notice(tr(interaction.guild_id, "close.confirm"))),
         ephemeral=True,
     )
 
@@ -2888,9 +3013,9 @@ def _staff_only(interaction: discord.Interaction):
 async def _claim(interaction: discord.Interaction) -> None:
     ticket, err = _staff_only(interaction)
     if err:
-        return await interaction.response.send_message(embed=err, ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(err), ephemeral=True)
     if ticket["claimed_by"] == interaction.user.id:
-        return await interaction.response.send_message(embed=error_notice("You already claimed this ticket."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(error_notice("You already claimed this ticket.")), ephemeral=True)
 
     ticket["claimed_by"] = interaction.user.id
     ticket["last_activity"] = now_ts()
@@ -2905,7 +3030,7 @@ async def _claim(interaction: discord.Interaction) -> None:
     log.add_field(name="Claimed by", value=interaction.user.mention, inline=True)
     await _log(interaction.guild, log)
 
-class UserPickView(discord.ui.View):
+class UserPickView(V2Panel):
 
     def __init__(self, placeholder: str, on_pick):
         super().__init__(timeout=120)
@@ -2914,7 +3039,7 @@ class UserPickView(discord.ui.View):
         async def chosen(interaction: discord.Interaction):
             member = interaction.guild.get_member(select.values[0].id)
             if member is None:
-                return await interaction.response.send_message(embed=error_notice("That member isn't in this server."), ephemeral=True)
+                return await interaction.response.send_message(view=as_v2(error_notice("That member isn't in this server.")), ephemeral=True)
             await on_pick(interaction, member)
 
         select.callback = chosen
@@ -2923,29 +3048,28 @@ class UserPickView(discord.ui.View):
 async def _transfer(interaction: discord.Interaction) -> None:
     ticket, err = _staff_only(interaction)
     if err:
-        return await interaction.response.send_message(embed=err, ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(err), ephemeral=True)
 
     async def on_pick(inter: discord.Interaction, member: discord.Member):
         if not is_staff(member):
-            return await inter.response.send_message(embed=error_notice("You can only transfer to a staff member."), ephemeral=True)
+            return await inter.response.send_message(view=as_v2(error_notice("You can only transfer to a staff member.")), ephemeral=True)
         ticket["claimed_by"] = member.id
         save_tickets()
-        await inter.response.send_message(embed=notice(f"{E('transfer', '🔁')} Ticket transferred to {member.mention}."), ephemeral=True)
+        await inter.response.send_message(view=as_v2(notice(f"{E('transfer', '🔁')} Ticket transferred to {member.mention}.")), ephemeral=True)
         await interaction.channel.send(
             content=f"{E('transfer', '🔁')} Ticket transferred to {member.mention}.",
             allowed_mentions=discord.AllowedMentions(users=True),
         )
 
     await interaction.response.send_message(
-        embed=notice("Pick the staff member who will take over this ticket."),
-        view=UserPickView("Pick a staff member…", on_pick),
+        view=with_body(UserPickView("Pick a staff member…", on_pick), notice("Pick the staff member who will take over this ticket.")),
         ephemeral=True,
     )
 
 async def _toggle_links(interaction: discord.Interaction) -> None:
     ticket, err = _staff_only(interaction)
     if err:
-        return await interaction.response.send_message(embed=err, ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(err), ephemeral=True)
     ticket["links_allowed"] = not ticket.get("links_allowed", True)
     save_tickets()
     await interaction.response.edit_message(view=ticket_layout(ticket))
@@ -2956,18 +3080,18 @@ class RenameModal(discord.ui.Modal, title="Rename channel"):
     async def on_submit(self, interaction: discord.Interaction):
         name = slugify(self.new_name.value)
         await interaction.channel.edit(name=name, reason=f"Renamed by {interaction.user}")
-        await interaction.response.send_message(embed=notice(f"{E('support', '✏️')} Channel renamed to `{name}`."), ephemeral=True)
+        await interaction.response.send_message(view=as_v2(notice(f"{E('support', '✏️')} Channel renamed to `{name}`.")), ephemeral=True)
 
 async def _rename(interaction: discord.Interaction) -> None:
     _, err = _staff_only(interaction)
     if err:
-        return await interaction.response.send_message(embed=err, ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(err), ephemeral=True)
     await interaction.response.send_modal(RenameModal())
 
 async def _add_or_remove_user(interaction: discord.Interaction, add: bool) -> None:
     ticket, err = _staff_only(interaction)
     if err:
-        return await interaction.response.send_message(embed=err, ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(err), ephemeral=True)
 
     async def on_pick(inter: discord.Interaction, member: discord.Member):
         channel = inter.channel
@@ -2979,10 +3103,10 @@ async def _add_or_remove_user(interaction: discord.Interaction, add: bool) -> No
             text = f"{E('true', '✅')} {member.mention} was added to this ticket."
         else:
             if member.id == ticket["user_id"]:
-                return await inter.response.send_message(embed=error_notice("You can't remove the ticket owner."), ephemeral=True)
+                return await inter.response.send_message(view=as_v2(error_notice("You can't remove the ticket owner.")), ephemeral=True)
             await channel.set_permissions(member, overwrite=None, reason=f"Removed by {inter.user}")
             text = f"{E('false', '❌')} {member.mention} was removed from this ticket."
-        await inter.response.send_message(embed=notice(text), ephemeral=True)
+        await inter.response.send_message(view=as_v2(notice(text)), ephemeral=True)
         await channel.send(content=text, allowed_mentions=discord.AllowedMentions.none())
 
     placeholder = "Pick a member to add…" if add else "Pick a member to remove…"
@@ -3026,7 +3150,7 @@ async def on_message(message: discord.Message):
                 try:
                     await message.delete()
                     await message.channel.send(
-                        embed=notice(f"{E(['link~2', 'link_2', 'link2', 'link'], '🔗')} Links are turned off in this ticket."),
+                        view=as_v2(notice(f"{E(['link~2', 'link_2', 'link2', 'link'], '🔗')} Links are turned off in this ticket.")),
                         delete_after=6,
                     )
                 except discord.HTTPException:
@@ -3062,7 +3186,7 @@ async def categorytickets(interaction: discord.Interaction, category: discord.Ca
     ticket_data["category_id"] = category.id
     save_tickets()
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} New tickets will be opened in **{category.name}**."), ephemeral=True
+        view=as_v2(notice(f"{E('true', '✅')} New tickets will be opened in **{category.name}**.")), ephemeral=True
     )
 
 @bot.tree.command(name="tickets-setup", description="Post the ticket panel in this channel.")
@@ -3072,7 +3196,7 @@ async def categorytickets(interaction: discord.Interaction, category: discord.Ca
 async def tickets_setup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     await post_panel(interaction.channel, interaction.guild)
-    await interaction.followup.send(embed=notice(f"{E('true', '✅')} Panel posted in {interaction.channel.mention}."), ephemeral=True)
+    await interaction.followup.send(view=as_v2(notice(f"{E('true', '✅')} Panel posted in {interaction.channel.mention}.")), ephemeral=True)
 
 WELCOMES_FILE = DATA_DIR / "welcomes.json"
 WELCOME_SERVER_NAME = "Synex Protect"
@@ -3163,7 +3287,7 @@ async def despedidas_setup(interaction: discord.Interaction, channel: discord.Te
     goodbye_config[str(interaction.guild_id)] = channel.id
     save_goodbyes()
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'goodbye.set', channel=channel.mention)}"), ephemeral=True
+        view=as_v2(notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'goodbye.set', channel=channel.mention)}")), ephemeral=True
     )
 
 
@@ -3175,7 +3299,7 @@ async def despedidas_off(interaction: discord.Interaction):
     goodbye_config.pop(str(interaction.guild_id), None)
     save_goodbyes()
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'goodbye.off')}"), ephemeral=True
+        view=as_v2(notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'goodbye.off')}")), ephemeral=True
     )
 
 
@@ -3227,7 +3351,7 @@ def _fill(template: str, **values) -> str:
 async def boosts_setup(interaction: discord.Interaction, channel: discord.TextChannel):
     _save_boost_field(interaction.guild_id, "channel", channel.id)
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'boosts.set', channel=channel.mention)}"), ephemeral=True
+        view=as_v2(notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'boosts.set', channel=channel.mention)}")), ephemeral=True
     )
 
 
@@ -3443,7 +3567,7 @@ async def idioma(interaction: discord.Interaction, language: app_commands.Choice
     guild_langs[str(interaction.guild_id)] = language.value
     save_languages()
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'idioma.set', lang=language.name)}"), ephemeral=True
+        view=as_v2(notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'idioma.set', lang=language.name)}")), ephemeral=True
     )
 
 
@@ -3475,7 +3599,7 @@ async def servername(interaction: discord.Interaction, name: app_commands.Range[
     server_names[str(interaction.guild_id)] = name.strip()
     save_server_names()
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} The bot will call this server **{name.strip()}**."), ephemeral=True
+        view=as_v2(notice(f"{E('true', '✅')} The bot will call this server **{name.strip()}**.")), ephemeral=True
     )
 
 
@@ -3486,7 +3610,7 @@ async def servername(interaction: discord.Interaction, name: app_commands.Range[
 async def servername_reset(interaction: discord.Interaction):
     server_names.pop(str(interaction.guild_id), None)
     save_server_names()
-    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Server name reset."), ephemeral=True)
+    await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} Server name reset.")), ephemeral=True)
 
 
 @bot.tree.command(name="servername-settings", description="Show the name the bot uses for this server.")
@@ -3500,7 +3624,7 @@ async def servername_settings(interaction: discord.Interaction):
         ("Real Discord name", interaction.guild.name),
         ("Custom name", "Yes" if custom else "No, using the real name"),
     ]
-    await interaction.response.send_message(embed=_settings_embed("Server name settings", rows), ephemeral=True)
+    await interaction.response.send_message(view=as_v2(_settings_embed("Server name settings", rows)), ephemeral=True)
 
 
 def _settings_embed(title: str, rows: list[tuple[str, str]]) -> discord.Embed:
@@ -3526,7 +3650,7 @@ async def welcomes_setup(interaction: discord.Interaction, channel: discord.Text
     welcome_config[str(interaction.guild_id)] = channel.id
     save_welcomes()
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} Welcomes will be sent in {channel.mention}."), ephemeral=True
+        view=as_v2(notice(f"{E('true', '✅')} Welcomes will be sent in {channel.mention}.")), ephemeral=True
     )
 
 @bot.tree.command(name="autorol", description="Give this role automatically to everyone who joins.")
@@ -3538,13 +3662,13 @@ async def autorol(interaction: discord.Interaction, role: discord.Role):
     me = interaction.guild.me
     if role.is_default() or role.managed or role >= me.top_role:
         return await interaction.response.send_message(
-            embed=error_notice("I can't give that role. Make sure it's below my highest role and isn't managed by an integration."),
+            view=as_v2(error_notice("I can't give that role. Make sure it's below my highest role and isn't managed by an integration.")),
             ephemeral=True,
         )
     autoroles[str(interaction.guild_id)] = role.id
     save_autoroles()
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} New members will get {role.mention}."), ephemeral=True
+        view=as_v2(notice(f"{E('true', '✅')} New members will get {role.mention}.")), ephemeral=True
     )
 
 @bot.tree.command(name="autorol-off", description="Stop giving the auto role to new members.")
@@ -3554,7 +3678,7 @@ async def autorol(interaction: discord.Interaction, role: discord.Role):
 async def autorol_off(interaction: discord.Interaction):
     autoroles.pop(str(interaction.guild_id), None)
     save_autoroles()
-    await interaction.response.send_message(embed=notice("Auto role is off."), ephemeral=True)
+    await interaction.response.send_message(view=as_v2(notice("Auto role is off.")), ephemeral=True)
 
 
 @bot.tree.command(name="autorol-settings", description="Show the role given to new members.")
@@ -3570,7 +3694,7 @@ async def autorol_settings(interaction: discord.Interaction):
         value = f"Missing role (`{role_id}`)"
     else:
         value = role.mention
-    await interaction.response.send_message(embed=_settings_embed("Auto role settings", [("Role", value)]), ephemeral=True)
+    await interaction.response.send_message(view=as_v2(_settings_embed("Auto role settings", [("Role", value)])), ephemeral=True)
 
 ANTIRAID_FILE = DATA_DIR / "antiraid.json"
 PUNISH_ORDER = ["ban", "kick", "strip"]
@@ -3681,7 +3805,7 @@ async def _automod_on_message(message: discord.Message) -> None:
             return
         try:
             await message.channel.send(
-                embed=notice(f"{E(['link~2', 'link_2', 'link2', 'link'], '🔗')} Links aren't allowed here. GIFs are fine."),
+                view=as_v2(notice(f"{E(['link~2', 'link_2', 'link2', 'link'], '🔗')} Links aren't allowed here. GIFs are fine.")),
                 delete_after=6)
         except discord.HTTPException:
             pass
@@ -3815,7 +3939,7 @@ async def _alarm(guild: discord.Guild, title: str, lines: list[str], color: int 
     if channel is None:
         return
     try:
-        await channel.send(embed=base_embed(title, "\n".join(lines), color), allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(view=as_v2(base_embed(title, "\n".join(lines), color)), allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException as exc:
         print(f"[antiraid] could not post alert: {exc}")
 
@@ -3974,7 +4098,7 @@ async def _bot_added_by(guild: discord.Guild, user) -> str:
 async def _dm_owner(guild: discord.Guild, title: str, lines: list[str], color: int = ERROR) -> None:
     try:
         owner = guild.owner or await guild.fetch_member(guild.owner_id)
-        await owner.send(embed=base_embed(title, "\n".join(lines), color))
+        await owner.send(view=as_v2(base_embed(title, "\n".join(lines), color)))
     except (discord.HTTPException, AttributeError) as exc:
         print(f"[antiraid] could not DM owner: {exc}")
 
@@ -4179,7 +4303,7 @@ def _guard(guild: discord.Guild, fn):
     async def callback(interaction: discord.Interaction):
         if interaction.user.id != guild.owner_id:
             return await interaction.response.send_message(
-                embed=error_notice("Only the server owner can change protection settings."), ephemeral=True
+                view=as_v2(error_notice("Only the server owner can change protection settings.")), ephemeral=True
             )
         await fn(interaction)
     return callback
@@ -4221,7 +4345,7 @@ def _picker_action(guild: discord.Guild, kind: str, mode: str):
         verb = "Pick the members" if kind == "user" else "Pick the roles"
         verb += " to trust." if mode == "add" else " to stop trusting."
         await interaction.response.send_message(
-            embed=notice(verb), view=TrustPicker(guild, kind, mode), ephemeral=True
+            view=with_body(TrustPicker(guild, kind, mode), notice(verb)), ephemeral=True
         )
     return fn
 
@@ -4243,7 +4367,7 @@ class NumbersModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         if interaction.user.id != self.guild.owner_id:
             return await interaction.response.send_message(
-                embed=error_notice("Only the server owner can change protection settings."), ephemeral=True
+                view=as_v2(error_notice("Only the server owner can change protection settings.")), ephemeral=True
             )
         values = []
         for (label, path, low, high), text_input in zip(self.fields, self.inputs):
@@ -4251,11 +4375,11 @@ class NumbersModal(discord.ui.Modal):
                 value = int(text_input.value.strip())
             except ValueError:
                 return await interaction.response.send_message(
-                    embed=error_notice(f"**{label}** must be a number."), ephemeral=True
+                    view=as_v2(error_notice(f"**{label}** must be a number.")), ephemeral=True
                 )
             if not low <= value <= high:
                 return await interaction.response.send_message(
-                    embed=error_notice(f"**{label}** must be between {low} and {high}."), ephemeral=True
+                    view=as_v2(error_notice(f"**{label}** must be between {low} and {high}.")), ephemeral=True
                 )
             values.append((path, value))
         cfg = guild_cfg(self.guild.id)
@@ -4267,7 +4391,7 @@ class NumbersModal(discord.ui.Modal):
         )
 
 
-class TrustPicker(discord.ui.View):
+class TrustPicker(V2Panel):
     def __init__(self, guild: discord.Guild, kind: str, mode: str):
         super().__init__(timeout=180)
         self.guild = guild
@@ -4291,7 +4415,7 @@ class TrustPicker(discord.ui.View):
                 ids.remove(item.id)
         save_antiraid()
         await interaction.response.edit_message(
-            embed=notice(f"{E('true', '✅')} Trusted list updated."), view=None
+            view=as_v2(notice(f"{E('true', '✅')} Trusted list updated."))
         )
 
 
@@ -4560,7 +4684,7 @@ def build_protection_layout(guild: discord.Guild, section: str = "overview", rul
 async def antiraid_cmd(interaction: discord.Interaction):
     if interaction.user.id != interaction.guild.owner_id:
         return await interaction.response.send_message(
-            embed=error_notice("Only the server owner can open the protection panel."), ephemeral=True
+            view=as_v2(error_notice("Only the server owner can open the protection panel.")), ephemeral=True
         )
     await interaction.response.send_message(view=build_protection_layout(interaction.guild), ephemeral=True)
 
@@ -4791,14 +4915,14 @@ async def _reply_slash(interaction: discord.Interaction, ok: bool, payload) -> N
     if ok:
         await interaction.response.send_message(view=_action_card(*payload))
     else:
-        await interaction.response.send_message(embed=error_notice(payload), ephemeral=True)
+        await interaction.response.send_message(view=as_v2(error_notice(payload)), ephemeral=True)
 
 
 async def _reply_prefix(ctx: commands.Context, ok: bool, payload) -> None:
     if ok:
         await ctx.send(view=_action_card(*payload), allowed_mentions=discord.AllowedMentions.none())
     else:
-        await ctx.send(embed=error_notice(payload), delete_after=12)
+        await ctx.send(view=as_v2(error_notice(payload)), delete_after=12)
 
 
 @bot.tree.command(name="ban", description="Ban a member from the server.")
@@ -4830,7 +4954,7 @@ async def unban_cmd(interaction: discord.Interaction, user_id: str, reason: str 
     try:
         uid = int(user_id.strip())
     except ValueError:
-        return await interaction.response.send_message(embed=error_notice("Invalid user ID."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(error_notice("Invalid user ID.")), ephemeral=True)
     ok, payload = await mod_unban(interaction.guild, interaction.user, uid, reason)
     await _reply_slash(interaction, ok, payload)
 
@@ -4869,7 +4993,7 @@ async def kick_prefix(ctx: commands.Context, member: discord.Member, *, reason: 
 async def mute_cmd(interaction: discord.Interaction, member: discord.Member, duration: str, reason: str = "No reason given"):
     seconds = parse_duration(duration)
     if seconds is None:
-        return await interaction.response.send_message(embed=error_notice("Use a time like `10m`, `2h` or `1d`."), ephemeral=True)
+        return await interaction.response.send_message(view=as_v2(error_notice("Use a time like `10m`, `2h` or `1d`.")), ephemeral=True)
     ok, payload = await mod_mute(interaction.guild, interaction.user, member, seconds, reason)
     await _reply_slash(interaction, ok, payload)
 
@@ -4880,7 +5004,7 @@ async def mute_cmd(interaction: discord.Interaction, member: discord.Member, dur
 async def mute_prefix(ctx: commands.Context, member: discord.Member, duration: str, *, reason: str = "No reason given"):
     seconds = parse_duration(duration)
     if seconds is None:
-        return await ctx.send(embed=error_notice("Use a time like `10m`, `2h` or `1d`."), delete_after=12)
+        return await ctx.send(view=as_v2(error_notice("Use a time like `10m`, `2h` or `1d`.")), delete_after=12)
     ok, payload = await mod_mute(ctx.guild, ctx.author, member, seconds, reason)
     await _reply_prefix(ctx, ok, payload)
 
@@ -4919,12 +5043,12 @@ class ModlogEventsSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_guild:
-            return await interaction.response.send_message(embed=error_notice("You need Manage Server for this."), ephemeral=True)
+            return await interaction.response.send_message(view=as_v2(error_notice("You need Manage Server for this.")), ephemeral=True)
         cfg = modlog_cfg(self.guild_id)
         for key in MODLOG_EVENTS:
             cfg["events"][key] = key in self.values
         save_modlog()
-        await interaction.response.edit_message(embed=notice(f"{E('true', '✅')} Log events updated."), view=None)
+        await interaction.response.edit_message(view=as_v2(notice(f"{E('true', '✅')} Log events updated.")))
 
 
 @bot.tree.command(name="modlog-setup", description="Send moderation, invite and voice logs to this channel.")
@@ -4936,7 +5060,7 @@ async def modlog_setup(interaction: discord.Interaction, channel: discord.TextCh
     modlog_cfg(interaction.guild_id)["channel"] = channel.id
     save_modlog()
     await _refresh_invites(interaction.guild)
-    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Logs will be sent in {channel.mention}."), ephemeral=True)
+    await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} Logs will be sent in {channel.mention}.")), ephemeral=True)
 
 
 @bot.tree.command(name="modlog-off", description="Stop sending logs.")
@@ -4946,7 +5070,7 @@ async def modlog_setup(interaction: discord.Interaction, channel: discord.TextCh
 async def modlog_off(interaction: discord.Interaction):
     modlog_cfg(interaction.guild_id)["channel"] = None
     save_modlog()
-    await interaction.response.send_message(embed=notice("Logs are off."), ephemeral=True)
+    await interaction.response.send_message(view=as_v2(notice("Logs are off.")), ephemeral=True)
 
 
 @bot.tree.command(name="modlog-events", description="Choose which events are logged.")
@@ -4954,10 +5078,10 @@ async def modlog_off(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.guild_only()
 async def modlog_events(interaction: discord.Interaction):
-    view = discord.ui.View(timeout=300)
+    view = V2Panel(timeout=300)
     view.add_item(ModlogEventsSelect(interaction.guild))
     await interaction.response.send_message(
-        embed=notice("Pick the events to log. Unselected events are turned off."), view=view, ephemeral=True
+        view=with_body(view, notice("Pick the events to log. Unselected events are turned off.")), ephemeral=True
     )
 
 
@@ -4973,7 +5097,7 @@ async def modlog_settings(interaction: discord.Interaction):
         ("Events on", f"{len(active)}/{len(MODLOG_EVENTS)}"),
         ("Events", ", ".join(f"`{e}`" for e in active) or "None"),
     ]
-    await interaction.response.send_message(embed=_settings_embed("Log settings", rows), ephemeral=True)
+    await interaction.response.send_message(view=as_v2(_settings_embed("Log settings", rows)), ephemeral=True)
 
 
 async def _log_ban(guild: discord.Guild, user: discord.User) -> None:
@@ -5145,7 +5269,7 @@ async def invites_setup(interaction: discord.Interaction, channel: discord.TextC
     invites_store["channels"][str(interaction.guild_id)] = channel.id
     save_invites()
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'invites.set', channel=channel.mention)}"), ephemeral=True
+        view=as_v2(notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'invites.set', channel=channel.mention)}")), ephemeral=True
     )
 
 
@@ -5157,7 +5281,7 @@ async def invites_off(interaction: discord.Interaction):
     invites_store["channels"].pop(str(interaction.guild_id), None)
     save_invites()
     await interaction.response.send_message(
-        embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'invites.off')}"), ephemeral=True
+        view=as_v2(notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'invites.off')}")), ephemeral=True
     )
 
 
@@ -5310,7 +5434,7 @@ class AnimeView(discord.ui.LayoutView):
     async def _give_back(self, interaction: discord.Interaction):
         if interaction.user.id != self.target.id:
             return await interaction.response.send_message(
-                embed=error_notice(tr(self.gid, "anime.only_receiver")), ephemeral=True
+                view=as_v2(error_notice(tr(self.gid, "anime.only_receiver"))), ephemeral=True
             )
         await interaction.response.defer()
         gif = await _anime_gif(self.category)
@@ -5408,7 +5532,7 @@ async def afk_prefix(ctx: commands.Context, *, reason: str = "AFK"):
         return
     renamed = await _start_afk(ctx.author, reason[:120])
     note = "" if renamed else "\n-# No pude poner [AFK] en tu apodo: revisa que mi rol esté por encima del tuyo y que tenga Gestionar apodos."
-    await ctx.reply(embed=base_embed(f"{E('warn3', '😴')} {tr(ctx.guild.id, 'afk.now')}", reason[:120] + note, STEEL),
+    await ctx.reply(view=as_v2(base_embed(f"{E('warn3', '😴')} {tr(ctx.guild.id, 'afk.now')}", reason[:120] + note, STEEL)),
                     mention_author=False)
 
 
@@ -5419,7 +5543,7 @@ async def afk_slash(interaction: discord.Interaction, reason: app_commands.Range
     renamed = await _start_afk(interaction.user, reason)
     note = "" if renamed else "\n-# No pude poner [AFK] en tu apodo: revisa que mi rol esté por encima del tuyo y que tenga Gestionar apodos."
     await interaction.response.send_message(
-        embed=base_embed(f"{E('warn3', '😴')} {tr(interaction.guild_id, 'afk.now')}", reason + note, STEEL), ephemeral=True)
+        view=as_v2(base_embed(f"{E('warn3', '😴')} {tr(interaction.guild_id, 'afk.now')}", reason + note, STEEL)), ephemeral=True)
 
 
 async def _afk_on_message(message: discord.Message) -> None:
@@ -5436,7 +5560,7 @@ async def _afk_on_message(message: discord.Message) -> None:
         for item in record["mentions"][:10]:
             lines.append(f"• {item['author']}: [{tr(gid, 'afk.jump')}]({item['url']})")
         try:
-            await message.channel.send(embed=base_embed(f"😴 {tr(gid, 'afk.welcome_title')}", "\n".join(lines), STEEL),
+            await message.channel.send(view=as_v2(base_embed(f"😴 {tr(gid, 'afk.welcome_title')}", "\n".join(lines), STEEL)),
                                        allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException:
             pass
@@ -5455,8 +5579,8 @@ async def _afk_on_message(message: discord.Message) -> None:
         try:
             away = f"<t:{mentioned['since']}:R>"
             await message.channel.send(
-                embed=base_embed(f"{E('warn3', '😴')} {tr(gid, 'afk.mention_title', name=target.display_name, time=away)}",
-                                 f"**Reason:** {mentioned['reason']}", STEEL),
+                view=as_v2(base_embed(f"{E('warn3', '😴')} {tr(gid, 'afk.mention_title', name=target.display_name, time=away)}",
+                                 f"**Reason:** {mentioned['reason']}", STEEL)),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException:
@@ -5464,8 +5588,8 @@ async def _afk_on_message(message: discord.Message) -> None:
     if bot.user is not None and re.search(rf"<@!?{bot.user.id}>", message.content or ""):
         try:
             await message.channel.send(
-                embed=base_embed(tr(gid, "bot.hi", name=message.author.display_name),
-                                 tr(gid, "bot.intro", server=server_name(message.guild)), STEEL),
+                view=as_v2(base_embed(tr(gid, "bot.hi", name=message.author.display_name),
+                                 tr(gid, "bot.intro", server=server_name(message.guild)), STEEL)),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException:
@@ -5634,7 +5758,7 @@ def render_text(text: str, **values) -> str:
     return text
 
 
-class SettingsPanel(discord.ui.View):
+class SettingsPanel(V2Panel):
     def __init__(self, owner_id: int):
         super().__init__(timeout=300)
         self.owner_id = owner_id
@@ -5642,7 +5766,7 @@ class SettingsPanel(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message(
-                embed=error_notice("This panel belongs to someone else."), ephemeral=True)
+                view=as_v2(error_notice("This panel belongs to someone else.")), ephemeral=True)
             return False
         return True
 
@@ -5650,10 +5774,11 @@ class SettingsPanel(discord.ui.View):
         raise NotImplementedError
 
     async def show(self, interaction: discord.Interaction) -> None:
-        await interaction.response.edit_message(embed=self.render(interaction.guild), view=self)
+        self.set_body(self.render(interaction.guild))
+        await interaction.response.edit_message(view=self)
 
     async def done(self, interaction: discord.Interaction, text: str) -> None:
-        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} {text}"), ephemeral=True)
+        await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} {text}")), ephemeral=True)
 
 
 class ChannelPick(discord.ui.ChannelSelect):
@@ -5693,11 +5818,11 @@ class WelcomeButtonModal(discord.ui.Modal, title="Welcome button"):
             position = 0
         if not 1 <= position <= WELCOME_BUTTON_LIMIT:
             return await interaction.response.send_message(
-                embed=error_notice(f"Position must be between 1 and {WELCOME_BUTTON_LIMIT}."), ephemeral=True)
+                view=as_v2(error_notice(f"Position must be between 1 and {WELCOME_BUTTON_LIMIT}.")), ephemeral=True)
         url = self.url.value.strip()
         if not url.startswith("https://"):
             return await interaction.response.send_message(
-                embed=error_notice("The link must start with https://"), ephemeral=True)
+                view=as_v2(error_notice("The link must start with https://")), ephemeral=True)
         emoji_value = None
         raw_emoji = self.emoji.value.strip()
         if raw_emoji:
@@ -5705,12 +5830,12 @@ class WelcomeButtonModal(discord.ui.Modal, title="Welcome button"):
                 discord.PartialEmoji.from_str(raw_emoji)
             except (ValueError, TypeError):
                 return await interaction.response.send_message(
-                    embed=error_notice("That emoji is not valid."), ephemeral=True)
+                    view=as_v2(error_notice("That emoji is not valid.")), ephemeral=True)
             emoji_value = raw_emoji
         buttons = welcome_buttons_for(interaction.guild_id)
         if position > len(buttons) + 1:
             return await interaction.response.send_message(
-                embed=error_notice(f"Fill slot {len(buttons) + 1} first."), ephemeral=True)
+                view=as_v2(error_notice(f"Fill slot {len(buttons) + 1} first.")), ephemeral=True)
         entry = {"label": self.button_text.value.strip(), "url": url, "emoji": emoji_value}
         if position > len(buttons):
             buttons.append(entry)
@@ -5719,7 +5844,7 @@ class WelcomeButtonModal(discord.ui.Modal, title="Welcome button"):
         welcome_buttons_config[str(interaction.guild_id)] = buttons
         save_welcome_buttons()
         await interaction.response.send_message(
-            embed=notice(f"{E('true', '✅')} Welcome button {position} saved: **{entry['label']}**."), ephemeral=True)
+            view=as_v2(notice(f"{E('true', '✅')} Welcome button {position} saved: **{entry['label']}**.")), ephemeral=True)
 
 
 class WelcomeButtonRemoveModal(discord.ui.Modal, title="Remove welcome button"):
@@ -5733,15 +5858,15 @@ class WelcomeButtonRemoveModal(discord.ui.Modal, title="Remove welcome button"):
         buttons = welcome_buttons_for(interaction.guild_id)
         if not 1 <= position <= len(buttons):
             return await interaction.response.send_message(
-                embed=error_notice("There is no button in that slot."), ephemeral=True)
+                view=as_v2(error_notice("There is no button in that slot.")), ephemeral=True)
         if len(buttons) == 1:
             return await interaction.response.send_message(
-                embed=error_notice("A welcome message needs at least one button."), ephemeral=True)
+                view=as_v2(error_notice("A welcome message needs at least one button.")), ephemeral=True)
         buttons.pop(position - 1)
         welcome_buttons_config[str(interaction.guild_id)] = buttons
         save_welcome_buttons()
         await interaction.response.send_message(
-            embed=notice(f"{E('true', '✅')} Welcome button {position} removed."), ephemeral=True)
+            view=as_v2(notice(f"{E('true', '✅')} Welcome button {position} removed.")), ephemeral=True)
 
 
 # ---------- /invites-settings ----------
@@ -5792,7 +5917,7 @@ class InvitesPanel(SettingsPanel):
 @app_commands.guild_only()
 async def invites_settings(interaction: discord.Interaction):
     await interaction.response.send_message(
-        embed=invites_embed(interaction.guild), view=InvitesPanel(interaction.user.id), ephemeral=True)
+        view=with_body(InvitesPanel(interaction.user.id), invites_embed(interaction.guild)), ephemeral=True)
 
 
 # Panel de configuración de boosts: /boosts-settings
@@ -5811,7 +5936,7 @@ def boosts_embed(guild: discord.Guild) -> discord.Embed:
 def _boost_saver(key: str):
     async def save(interaction: discord.Interaction, value: str):
         _save_boost_field(interaction.guild_id, key, value)
-        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'boosts.saved')}"), ephemeral=True)
+        await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'boosts.saved')}")), ephemeral=True)
     return save
 
 
@@ -5820,9 +5945,9 @@ async def _save_boost_color(interaction: discord.Interaction, value: str):
         color = parse_color(value) if value else None
     except ValueError:
         return await interaction.response.send_message(
-            embed=error_notice("Use a color name from the list or a hex code like #9B59B6."), ephemeral=True)
+            view=as_v2(error_notice("Use a color name from the list or a hex code like #9B59B6.")), ephemeral=True)
     _save_boost_field(interaction.guild_id, "color", color)
-    await interaction.response.send_message(embed=notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'boosts.saved')}"), ephemeral=True)
+    await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'boosts.saved')}")), ephemeral=True)
 
 
 class BoostsPanel(SettingsPanel):
@@ -5868,7 +5993,7 @@ class BoostsPanel(SettingsPanel):
 @app_commands.guild_only()
 async def boosts_settings(interaction: discord.Interaction):
     await interaction.response.send_message(
-        embed=boosts_embed(interaction.guild), view=BoostsPanel(interaction.user.id), ephemeral=True)
+        view=with_body(BoostsPanel(interaction.user.id), boosts_embed(interaction.guild)), ephemeral=True)
 
 
 # ---------- /prefix: nickname prefix for members with a role ----------
@@ -5935,7 +6060,7 @@ async def prefix_cmd(interaction: discord.Interaction, role: discord.Role, prefi
         await _sync_prefix(member)
         await asyncio.sleep(0.4)
     await interaction.followup.send(
-        embed=notice(f"{E('true', '✅')} Prefix **{prefix.strip()}** set for {role.mention}. Updated {len(members)} member(s)."),
+        view=as_v2(notice(f"{E('true', '✅')} Prefix **{prefix.strip()}** set for {role.mention}. Updated {len(members)} member(s).")),
         ephemeral=True)
 
 
@@ -5955,7 +6080,7 @@ async def prefix_remove(interaction: discord.Interaction, role: discord.Role):
                 await _sync_prefix(member)
             await asyncio.sleep(0.4)
     await interaction.followup.send(
-        embed=notice(f"{E('true', '✅')} Prefix removed from {role.mention}." if old else "That role has no prefix."),
+        view=as_v2(notice(f"{E('true', '✅')} Prefix removed from {role.mention}." if old else "That role has no prefix.")),
         ephemeral=True)
 
 
@@ -6047,7 +6172,7 @@ async def stats_setup(interaction: discord.Interaction):
     gid = str(interaction.guild_id)
     if gid in stats_config:
         return await interaction.response.send_message(
-            embed=error_notice("Stats already exist. Use /stats-settings to edit them."), ephemeral=True)
+            view=as_v2(error_notice("Stats already exist. Use /stats-settings to edit them.")), ephemeral=True)
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
     overwrites = _stats_overwrites(guild)
@@ -6063,7 +6188,7 @@ async def stats_setup(interaction: discord.Interaction):
     save_stats()
     schedule_stats(guild)
     await interaction.followup.send(
-        embed=notice(f"{E('true', '✅')} Stats created under **{category.name}**. Use /stats-settings to edit them."),
+        view=as_v2(notice(f"{E('true', '✅')} Stats created under **{category.name}**. Use /stats-settings to edit them.")),
         ephemeral=True)
 
 
@@ -6086,7 +6211,7 @@ def _stats_saver(field: str):
         cfg = stats_config.get(str(interaction.guild_id))
         if not cfg:
             return await interaction.response.send_message(
-                embed=error_notice("Stats are not set up. Use /stats-setup first."), ephemeral=True)
+                view=as_v2(error_notice("Stats are not set up. Use /stats-setup first.")), ephemeral=True)
         if field == "category":
             category = interaction.guild.get_channel(cfg.get("category", 0))
             if category is not None:
@@ -6099,7 +6224,7 @@ def _stats_saver(field: str):
                 labels.pop(field, None)
         save_stats()
         schedule_stats(interaction.guild)
-        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Saved."), ephemeral=True)
+        await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} Saved.")), ephemeral=True)
     return save
 
 
@@ -6137,7 +6262,7 @@ class StatsPanel(SettingsPanel):
     async def refresh(self, interaction, button):
         await interaction.response.defer()
         await update_stats(interaction.guild)
-        await interaction.edit_original_response(embed=stats_embed(interaction.guild), view=self)
+        await interaction.edit_original_response(view=with_body(self, stats_embed(interaction.guild)))
 
     @discord.ui.button(label="Remove", style=discord.ButtonStyle.danger, row=1)
     async def remove(self, interaction, button):
@@ -6153,7 +6278,7 @@ class StatsPanel(SettingsPanel):
                     except discord.HTTPException as exc:
                         print(f"[stats] could not delete: {exc}")
         await interaction.response.edit_message(
-            embed=notice(f"{E('true', '✅')} Stats removed."), view=None)
+            view=as_v2(notice(f"{E('true', '✅')} Stats removed.")))
 
 
 @bot.tree.command(name="stats-settings", description="Edit the Stats category: names, labels and refresh.")
@@ -6163,9 +6288,9 @@ class StatsPanel(SettingsPanel):
 async def stats_settings(interaction: discord.Interaction):
     if str(interaction.guild_id) not in stats_config:
         return await interaction.response.send_message(
-            embed=error_notice("Stats are not set up. Use /stats-setup first."), ephemeral=True)
+            view=as_v2(error_notice("Stats are not set up. Use /stats-setup first.")), ephemeral=True)
     await interaction.response.send_message(
-        embed=stats_embed(interaction.guild), view=StatsPanel(interaction.user.id), ephemeral=True)
+        view=with_body(StatsPanel(interaction.user.id), stats_embed(interaction.guild)), ephemeral=True)
 
 
 # Panel de configuración de tickets: /tickets-settings
@@ -6236,9 +6361,9 @@ class TicketTextModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         text = self.field.value.strip()
         if not text:
-            return await interaction.response.send_message(embed=error_notice("That can't be empty."), ephemeral=True)
+            return await interaction.response.send_message(view=as_v2(error_notice("That can't be empty.")), ephemeral=True)
         set_ticket_setting(self.setting, text)
-        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Saved."), ephemeral=True)
+        await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} Saved.")), ephemeral=True)
 
 
 class TicketIntModal(discord.ui.Modal):
@@ -6255,9 +6380,9 @@ class TicketIntModal(discord.ui.Modal):
             value = None
         if value is None or not self.low <= value <= self.high:
             return await interaction.response.send_message(
-                embed=error_notice(f"Enter a number between {self.low} and {self.high}."), ephemeral=True)
+                view=as_v2(error_notice(f"Enter a number between {self.low} and {self.high}.")), ephemeral=True)
         set_ticket_setting(self.setting, value)
-        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Saved."), ephemeral=True)
+        await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} Saved.")), ephemeral=True)
 
 
 class TicketColorModal(discord.ui.Modal):
@@ -6274,9 +6399,9 @@ class TicketColorModal(discord.ui.Modal):
             code = parse_color(self.field.value)
         except ValueError:
             return await interaction.response.send_message(
-                embed=error_notice("Use a color name from the list or a hex code like #3B82F6."), ephemeral=True)
+                view=as_v2(error_notice("Use a color name from the list or a hex code like #3B82F6.")), ephemeral=True)
         set_ticket_setting(self.setting, code)
-        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Color saved."), ephemeral=True)
+        await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} Color saved.")), ephemeral=True)
 
 
 class TicketTypeModal(discord.ui.Modal):
@@ -6300,7 +6425,7 @@ class TicketTypeModal(discord.ui.Modal):
         try:
             discord.PartialEmoji.from_str(emoji)
         except (ValueError, TypeError):
-            return await interaction.response.send_message(embed=error_notice("That emoji is not valid."), ephemeral=True)
+            return await interaction.response.send_message(view=as_v2(error_notice("That emoji is not valid.")), ephemeral=True)
         entry = {
             "label": label,
             "emoji": emoji,
@@ -6318,7 +6443,7 @@ class TicketTypeModal(discord.ui.Modal):
                 n += 1
             TICKET_TYPES.append({"key": key, **entry})
         save_ticket_settings()
-        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Ticket type **{label}** saved."), ephemeral=True)
+        await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} Ticket type **{label}** saved.")), ephemeral=True)
 
 
 class TicketTypeRemoveModal(discord.ui.Modal, title="Remove ticket type"):
@@ -6328,12 +6453,12 @@ class TicketTypeRemoveModal(discord.ui.Modal, title="Remove ticket type"):
         key = self.key_in.value.strip().lower()
         target = ticket_type(key)
         if target is None:
-            return await interaction.response.send_message(embed=error_notice("There is no type with that key."), ephemeral=True)
+            return await interaction.response.send_message(view=as_v2(error_notice("There is no type with that key.")), ephemeral=True)
         if len(TICKET_TYPES) <= 1:
-            return await interaction.response.send_message(embed=error_notice("The panel needs at least one type."), ephemeral=True)
+            return await interaction.response.send_message(view=as_v2(error_notice("The panel needs at least one type.")), ephemeral=True)
         TICKET_TYPES.remove(target)
         save_ticket_settings()
-        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Type **{target['label']}** removed."), ephemeral=True)
+        await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} Type **{target['label']}** removed.")), ephemeral=True)
 
 
 class TicketChannelPick(discord.ui.ChannelSelect):
@@ -6363,7 +6488,7 @@ class TicketTypeSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         target = ticket_type(self.values[0])
         if target is None:
-            return await interaction.response.send_message(embed=error_notice("That type no longer exists."), ephemeral=True)
+            return await interaction.response.send_message(view=as_v2(error_notice("That type no longer exists.")), ephemeral=True)
         await interaction.response.send_modal(TicketTypeModal(target))
 
 
@@ -6373,27 +6498,27 @@ class TicketsMainPanel(SettingsPanel):
 
     @discord.ui.button(label="Channels", style=discord.ButtonStyle.primary, row=0)
     async def channels(self, interaction, button):
-        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketChannelsPanel(self.owner_id))
+        await interaction.response.edit_message(view=with_body(TicketChannelsPanel(self.owner_id), tickets_embed(interaction.guild)))
 
     @discord.ui.button(label="Support roles", style=discord.ButtonStyle.primary, row=0)
     async def roles(self, interaction, button):
-        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketRolesPanel(self.owner_id))
+        await interaction.response.edit_message(view=with_body(TicketRolesPanel(self.owner_id), tickets_embed(interaction.guild)))
 
     @discord.ui.button(label="Limits & transcripts", style=discord.ButtonStyle.primary, row=0)
     async def limits(self, interaction, button):
-        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketLimitsPanel(self.owner_id))
+        await interaction.response.edit_message(view=with_body(TicketLimitsPanel(self.owner_id), tickets_embed(interaction.guild)))
 
     @discord.ui.button(label="Panel", style=discord.ButtonStyle.primary, row=0)
     async def panel(self, interaction, button):
-        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketPanelPanel(self.owner_id))
+        await interaction.response.edit_message(view=with_body(TicketPanelPanel(self.owner_id), tickets_embed(interaction.guild)))
 
     @discord.ui.button(label="Ticket types", style=discord.ButtonStyle.primary, row=0)
     async def types(self, interaction, button):
-        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketTypesPanel(self.owner_id))
+        await interaction.response.edit_message(view=with_body(TicketTypesPanel(self.owner_id), tickets_embed(interaction.guild)))
 
     @discord.ui.button(label="Welcome message", style=discord.ButtonStyle.primary, row=1)
     async def welcome(self, interaction, button):
-        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketWelcomePanel(self.owner_id))
+        await interaction.response.edit_message(view=with_body(TicketWelcomePanel(self.owner_id), tickets_embed(interaction.guild)))
 
 
 class TicketSubPanel(SettingsPanel):
@@ -6406,7 +6531,7 @@ class TicketSubPanel(SettingsPanel):
 
     @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=4)
     async def back(self, interaction, button):
-        await interaction.response.edit_message(embed=tickets_embed(interaction.guild), view=TicketsMainPanel(self.owner_id))
+        await interaction.response.edit_message(view=with_body(TicketsMainPanel(self.owner_id), tickets_embed(interaction.guild)))
 
 
 class TicketChannelsPanel(TicketSubPanel):
@@ -6481,7 +6606,7 @@ class TicketPanelPanel(TicketSubPanel):
 
     async def _post(self, interaction, channel_id):
         if channel_id is None:
-            return await interaction.response.send_message(embed=error_notice("Pick a channel."), ephemeral=True)
+            return await interaction.response.send_message(view=as_v2(error_notice("Pick a channel.")), ephemeral=True)
         channel = interaction.guild.get_channel(channel_id)
         await post_panel(channel, interaction.guild)
         await self.done(interaction, f"Panel posted in {channel.mention}.")
@@ -6506,7 +6631,7 @@ class TicketPanelPanel(TicketSubPanel):
         channel = interaction.guild.get_channel(channel_id) if channel_id else None
         if channel is None:
             return await interaction.response.send_message(
-                embed=error_notice("There is no panel yet. Post one with the option above."), ephemeral=True)
+                view=as_v2(error_notice("There is no panel yet. Post one with the option above.")), ephemeral=True)
         await post_panel(channel, interaction.guild)
         await self.done(interaction, "Panel refreshed with the current types and text.")
 
@@ -6585,7 +6710,7 @@ if _saved_tickets:
 @app_commands.guild_only()
 async def tickets_settings(interaction: discord.Interaction):
     await interaction.response.send_message(
-        embed=tickets_embed(interaction.guild), view=TicketsMainPanel(interaction.user.id), ephemeral=True)
+        view=with_body(TicketsMainPanel(interaction.user.id), tickets_embed(interaction.guild)), ephemeral=True)
 
 
 
@@ -6705,7 +6830,7 @@ class StyleTextModal(discord.ui.Modal):
             else:
                 st.pop(key, None)
         _save_style(self.kind)
-        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Text saved."), ephemeral=True)
+        await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} Text saved.")), ephemeral=True)
 
 
 class StyleImagesModal(discord.ui.Modal, title="Images"):
@@ -6725,10 +6850,10 @@ class StyleImagesModal(discord.ui.Modal, title="Images"):
         banner = self.banner_in.value.strip()
         if thumb not in ("avatar", "none") and not thumb.startswith("https://"):
             return await interaction.response.send_message(
-                embed=error_notice("The thumbnail must be `avatar`, `none` or an https link."), ephemeral=True)
+                view=as_v2(error_notice("The thumbnail must be `avatar`, `none` or an https link.")), ephemeral=True)
         if banner and not banner.startswith("https://"):
             return await interaction.response.send_message(
-                embed=error_notice("The banner must be an https link."), ephemeral=True)
+                view=as_v2(error_notice("The banner must be an https link.")), ephemeral=True)
         st = _style_store(self.kind).setdefault(self.gid, {})
         st["thumbnail"] = thumb
         if banner:
@@ -6736,7 +6861,7 @@ class StyleImagesModal(discord.ui.Modal, title="Images"):
         else:
             st.pop("banner", None)
         _save_style(self.kind)
-        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Images saved."), ephemeral=True)
+        await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} Images saved.")), ephemeral=True)
 
 
 class StyleColorModal(discord.ui.Modal, title="Color"):
@@ -6755,11 +6880,11 @@ class StyleColorModal(discord.ui.Modal, title="Color"):
                 st["color"] = parse_color(raw)
             except ValueError:
                 return await interaction.response.send_message(
-                    embed=error_notice("Use a color name from the list or a hex code like #3B82F6."), ephemeral=True)
+                    view=as_v2(error_notice("Use a color name from the list or a hex code like #3B82F6.")), ephemeral=True)
         else:
             st.pop("color", None)
         _save_style(self.kind)
-        await interaction.response.send_message(embed=notice(f"{E('true', '✅')} Color saved."), ephemeral=True)
+        await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} Color saved.")), ephemeral=True)
 
 
 def welcomes_embed(guild: discord.Guild) -> discord.Embed:
@@ -6817,8 +6942,7 @@ class WelcomeButtonsPanel(SettingsPanel):
 
     @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=1)
     async def back(self, interaction, button):
-        await interaction.response.edit_message(embed=welcomes_embed(interaction.guild),
-                                                view=WelcomesPanel(self.owner_id))
+        await interaction.response.edit_message(view=with_body(WelcomesPanel(self.owner_id), welcomes_embed(interaction.guild)))
 
 
 class WelcomesPanel(SettingsPanel):
@@ -6854,8 +6978,7 @@ class WelcomesPanel(SettingsPanel):
 
     @discord.ui.button(label="Buttons", style=discord.ButtonStyle.primary, row=2)
     async def buttons(self, interaction, button):
-        await interaction.response.edit_message(embed=welcomes_embed(interaction.guild),
-                                                view=WelcomeButtonsPanel(self.owner_id))
+        await interaction.response.edit_message(view=with_body(WelcomeButtonsPanel(self.owner_id), welcomes_embed(interaction.guild)))
 
     @discord.ui.button(label="Preview", style=discord.ButtonStyle.secondary, row=2)
     async def preview(self, interaction, button):
@@ -6919,7 +7042,7 @@ class GoodbyesPanel(SettingsPanel):
 @app_commands.guild_only()
 async def welcomes_settings(interaction: discord.Interaction):
     await interaction.response.send_message(
-        embed=welcomes_embed(interaction.guild), view=WelcomesPanel(interaction.user.id), ephemeral=True)
+        view=with_body(WelcomesPanel(interaction.user.id), welcomes_embed(interaction.guild)), ephemeral=True)
 
 
 @bot.tree.command(name="despedidas-settings", description="Configure goodbyes: channel, text, images and color.")
@@ -6928,7 +7051,7 @@ async def welcomes_settings(interaction: discord.Interaction):
 @app_commands.guild_only()
 async def despedidas_settings(interaction: discord.Interaction):
     await interaction.response.send_message(
-        embed=goodbyes_embed(interaction.guild), view=GoodbyesPanel(interaction.user.id), ephemeral=True)
+        view=with_body(GoodbyesPanel(interaction.user.id), goodbyes_embed(interaction.guild)), ephemeral=True)
 
 
 @bot.command(name="resync")
@@ -6941,7 +7064,7 @@ async def resync_prefix(ctx: commands.Context):
     bot.tree.copy_global_to(guild=ctx.guild)
     synced = await bot.tree.sync(guild=ctx.guild)
     await ctx.reply(
-        embed=notice(f"{E('true', '✅')} {len(synced)} commands synced. If they still look old, close and reopen Discord."),
+        view=as_v2(notice(f"{E('true', '✅')} {len(synced)} commands synced. If they still look old, close and reopen Discord.")),
         mention_author=False,
     )
 
