@@ -23,14 +23,14 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.29.1"
+BOT_VERSION = "1.30.1"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
 SLATE = 0x2A2E35
 STEEL = 0x4A505A
 SILVER = 0x9AA1AC
-ERROR = 0x4B1D1D
+ERROR = 0x3A3E45
 
 START_TIME = datetime.now(timezone.utc)
 
@@ -133,7 +133,7 @@ def embed_children(embed: discord.Embed) -> list:
         lines.append(f"**{field.name}**\n{field.value}" if field.name else field.value)
     if embed.footer is not None and embed.footer.text:
         lines.append(f"-# {embed.footer.text}")
-    text = "\n\n".join(lines) or "\u200b"
+    text = "\n".join(lines) or "\u200b"
     children = []
     if embed.thumbnail is not None and embed.thumbnail.url:
         children.append(discord.ui.Section(discord.ui.TextDisplay(text),
@@ -141,7 +141,7 @@ def embed_children(embed: discord.Embed) -> list:
     else:
         children.append(discord.ui.TextDisplay(text))
     if embed.image is not None and embed.image.url:
-        children += [discord.ui.Separator(), discord.ui.MediaGallery(discord.MediaGalleryItem(embed.image.url))]
+        children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.MediaGallery(discord.MediaGalleryItem(embed.image.url))]
     return children
 
 
@@ -227,7 +227,7 @@ class V2Panel(discord.ui.LayoutView):
                 accent = self._body.colour.value
         rows = self._rows()
         if children and rows:
-            children.append(discord.ui.Separator())
+            children.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
         children += rows
         if not children:
             children = [discord.ui.TextDisplay("\u200b")]
@@ -351,18 +351,18 @@ def now_ts() -> int:
 def build_ping_layout() -> discord.ui.LayoutView:
     ms = round(bot.latency * 1000)
     if ms < 100:
-        status, color = f"{E(['true', 'check'], '✅')} Excellent", 0x22C55E
+        status, color = f"{E(['true', 'check'], '✅')} Excellent", SILVER
     elif ms < 200:
-        status, color = f"{E(['warn3', 'warn'], '🟡')} Good", 0xFACC15
+        status, color = f"{E(['warn3', 'warn'], '🟡')} Good", STEEL
     else:
-        status, color = f"{E(['Error', 'warn'], '🔴')} Degraded", 0xEF4444
+        status, color = f"{E(['Error', 'warn'], '🔴')} Degraded", SLATE
     head = discord.ui.TextDisplay(f"### {E(['ping', 'latency'], '⚡')} Pong\n-# Connection to Discord")
     stats = discord.ui.TextDisplay(f"**Latency** · `{ms} ms`\n**Status** · {status}")
     container = discord.ui.Container(
         head,
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         stats,
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(f"-# {BOT_NAME} · v{BOT_VERSION}"),
         accent_colour=color,
     )
@@ -455,9 +455,9 @@ def build_server_layout(guild: discord.Guild, section: str = "server", page: int
 
     children = [
         head,
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(body),
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.ActionRow(select),
     ]
 
@@ -518,9 +518,9 @@ def build_botinfo_layout() -> discord.ui.LayoutView:
     )
     container = discord.ui.Container(
         head,
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         stats,
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(f"-# {BOT_NAME} · v{BOT_VERSION}"),
         accent_colour=STEEL,
     )
@@ -2349,7 +2349,7 @@ def build_ticket_controls(ticket: dict, head: str = "", body: str = "", avatar_u
         head_block,
         discord.ui.TextDisplay(body),
         discord.ui.TextDisplay("-# Staff tools are above · Only staff can use them"),
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.ActionRow(staff_menu),
         row_buttons,
         accent_colour=STEEL,
@@ -2906,11 +2906,11 @@ async def tickets_log(interaction: discord.Interaction, number: int | None = Non
     note = "Transcript attached" if transcript is not None else "No transcript saved"
     container = discord.ui.Container(
         discord.ui.TextDisplay(f"### 🎫 Ticket #{record['number']:04d} · {record['type']}\n-# {status}"),
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay("\n".join(info)),
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay("**Members**\n" + "\n".join(member_lines)),
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(f"-# {BOT_NAME} · Ticket log · {note}"),
         accent_colour=STEEL,
     )
@@ -3376,11 +3376,11 @@ async def _on_member_boost(before: discord.Member, after: discord.Member) -> Non
     )
     container = discord.ui.Container(
         head,
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(body),
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(tr(gid, "boost.stats", **stats)),
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(f"-# {BOT_NAME} · Server boosts"),
         accent_colour=boost_color(gid),
     )
@@ -3434,6 +3434,10 @@ STRINGS = {
         "anime.return": "Return",
         "anime.footer": "{bot} · Anime reactions",
         "anime.only_receiver": "Only the person who received it can give it back.",
+        "anime.hug.self": "You can't hug yourself.",
+        "anime.kiss.self": "You can't kiss yourself.",
+        "anime.punch.self": "You can't punch yourself.",
+        "anime.usage": "Usage: `!{name} @user` · mention someone to send it to, or leave it empty to do it alone.",
         "afk.now": "You are now AFK",
         "afk.reason_default": "AFK",
         "afk.welcome_title": "Welcome back",
@@ -3502,6 +3506,10 @@ STRINGS = {
         "anime.return": "Devolver",
         "anime.footer": "{bot} · Reacciones anime",
         "anime.only_receiver": "Solo la persona que lo recibió puede devolverlo.",
+        "anime.hug.self": "No puedes abrazarte a ti mismo.",
+        "anime.kiss.self": "No puedes besarte a ti mismo.",
+        "anime.punch.self": "No puedes pegarte a ti mismo.",
+        "anime.usage": "Uso: `!{name} @usuario` · menciona a alguien para enviárselo, o déjalo vacío para hacerlo solo.",
         "afk.now": "Ahora estás AFK",
         "afk.reason_default": "AFK",
         "afk.welcome_title": "Bienvenido de vuelta",
@@ -4667,9 +4675,9 @@ def build_protection_layout(guild: discord.Guild, section: str = "overview", rul
     body, rows = SECTION_BUILDERS.get(section, _overview_section)(guild, cfg, rule_key)
     children = [
         discord.ui.TextDisplay(f"### Protection Panel\n-# {guild.name} · Owner only"),
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.ActionRow(nav),
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(body),
         *rows,
         discord.ui.TextDisplay("-# Changes apply right away"),
@@ -4786,10 +4794,10 @@ def _action_card(title: str, color: int, target, fields: list[tuple[str, str]], 
     avatar = _avatar_url(target)
     head_text = discord.ui.TextDisplay(f"### {title}\n-# {_who(target) if target else 'SynexProtect'}")
     head = (discord.ui.Section(head_text, accessory=discord.ui.Thumbnail(avatar)) if avatar else head_text)
-    children = [head, discord.ui.Separator(), discord.ui.TextDisplay(details)]
+    children = [head, discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.TextDisplay(details)]
     if media:
-        children += [discord.ui.Separator(), discord.ui.MediaGallery(*[discord.MediaGalleryItem(u) for u in media[:10]])]
-    children += [discord.ui.Separator(), discord.ui.TextDisplay(f"-# {BOT_NAME} · Moderation · {stamp}")]
+        children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.MediaGallery(*[discord.MediaGalleryItem(u) for u in media[:10]])]
+    children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.TextDisplay(f"-# {BOT_NAME} · Moderation · {stamp}")]
     container = discord.ui.Container(*children, accent_colour=color)
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(container)
@@ -5220,9 +5228,9 @@ async def _record_invite(member: discord.Member, inviter) -> None:
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(
         discord.ui.TextDisplay(f"### {E(['GE_member', 'community'], '🔗')} {tr(guild.id, 'invites.new')}"),
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(message),
-        discord.ui.Separator(),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
         discord.ui.TextDisplay(f"-# {BOT_NAME} · Invites"),
         accent_colour=STEEL,
     ))
@@ -5381,7 +5389,7 @@ def load_anime_stats() -> None:
     anime_stats = read_json(ANIME_STATS_FILE)
 
 
-def _anime_name(member) -> str:
+def _bold_name(member) -> str:
     """Anime texts show the name in bold instead of a mention tag."""
     return f"**{member.display_name}**"
 
@@ -5393,7 +5401,7 @@ def _pair_note(gid: int, action: str, a, b) -> str | None:
     key = f"{gid}:{action}:{low}:{high}"
     anime_stats[key] = anime_stats.get(key, 0) + 1
     write_json_atomic(ANIME_STATS_FILE, anime_stats)
-    return tr(gid, "anime.note", a=_anime_name(a), b=_anime_name(b), n=anime_stats[key], noun=tr(gid, f"anime.{action}.noun"))
+    return tr(gid, "anime.note", a=_bold_name(a), b=_bold_name(b), n=anime_stats[key], noun=tr(gid, f"anime.{action}.noun"))
 
 
 load_anime_stats()
@@ -5428,12 +5436,12 @@ class AnimeView(discord.ui.LayoutView):
         if note:
             children.append(discord.ui.TextDisplay(note))
         if gif:
-            children += [discord.ui.Separator(), discord.ui.MediaGallery(discord.MediaGalleryItem(gif))]
+            children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.MediaGallery(discord.MediaGalleryItem(gif))]
         if target is not None and back_text:
             button = discord.ui.Button(label=tr(gid, "anime.return"), emoji="↩️", style=discord.ButtonStyle.secondary)
             button.callback = self._give_back
-            children += [discord.ui.Separator(), discord.ui.ActionRow(button)]
-        children += [discord.ui.Separator(), discord.ui.TextDisplay(tr(gid, "anime.footer", bot=BOT_NAME))]
+            children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.ActionRow(button)]
+        children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.TextDisplay(tr(gid, "anime.footer", bot=BOT_NAME))]
         self.add_item(discord.ui.Container(*children, accent_colour=color))
 
     async def _give_back(self, interaction: discord.Interaction):
@@ -5443,7 +5451,7 @@ class AnimeView(discord.ui.LayoutView):
             )
         await interaction.response.defer()
         gif = await _anime_gif(self.category)
-        text = tr(self.gid, f"anime.{self.action}.back", a=_anime_name(self.target), b=_anime_name(self.author))
+        text = tr(self.gid, f"anime.{self.action}.back", a=_bold_name(self.target), b=_bold_name(self.author))
         note = _pair_note(self.gid, self.action, self.target, self.author)
         await interaction.followup.send(view=AnimeView(f"{ANIME_ACTIONS[self.action]['emoji']} {text}", gif, self.color,
                                                        gid=self.gid, action=self.action, note=note))
@@ -5455,15 +5463,17 @@ BANANA_IMAGE_URL = "https://static.vecteezy.com/system/resources/previews/024/73
 
 async def _send_anime(author, guild, name: str, member, send) -> None:
     cfg = ANIME_ACTIONS[name]
-    target = member if member is not None and member.id != author.id else None
     gid = guild.id if guild is not None else 0
+    if member is not None and member.id == author.id and name in ANIME_COUNTED:
+        return await send(view=as_v2(error_notice(tr(gid, f"anime.{name}.self"))))
+    target = member if member is not None and member.id != author.id else None
     file = None
     if name == "banana":
         centimeters = random.randint(5, 30)
         if target is None:
-            text = tr(gid, "anime.banana.measure", a=_anime_name(author), cm=centimeters)
+            text = tr(gid, "anime.banana.measure", a=_bold_name(author), cm=centimeters)
         else:
-            text = tr(gid, "anime.banana.measure_for", a=_anime_name(author), b=_anime_name(target), cm=centimeters)
+            text = tr(gid, "anime.banana.measure_for", a=_bold_name(author), b=_bold_name(target), cm=centimeters)
         gif = BANANA_IMAGE_URL
         if BANANA_IMAGE.exists():
             file = discord.File(BANANA_IMAGE, filename="banana.png")
@@ -5471,9 +5481,9 @@ async def _send_anime(author, guild, name: str, member, send) -> None:
         view = AnimeView(f"{cfg['emoji']} {text}", gif, cfg["color"], gid=gid)
     else:
         if target is None:
-            text = tr(gid, f"anime.{name}.solo", a=_anime_name(author))
+            text = tr(gid, f"anime.{name}.solo", a=_bold_name(author))
         else:
-            text = tr(gid, f"anime.{name}.text", a=_anime_name(author), b=_anime_name(target))
+            text = tr(gid, f"anime.{name}.text", a=_bold_name(author), b=_bold_name(target))
         note = _pair_note(gid, name, author, target) if target is not None else None
         gif = await _anime_gif(cfg["category"])
         back_text = tr(gid, f"anime.{name}.back") if cfg["back"] and target is not None else None
@@ -5487,7 +5497,15 @@ async def _send_anime(author, guild, name: str, member, send) -> None:
 
 def _register_anime_command(name: str) -> None:
     @bot.command(name=name)
-    async def anime_prefix(ctx: commands.Context, member: Optional[discord.User] = None):
+    async def anime_prefix(ctx: commands.Context, member_text: Optional[str] = None):
+        gid = ctx.guild.id if ctx.guild else 0
+        member = None
+        if member_text:
+            try:
+                member = await commands.UserConverter().convert(ctx, member_text)
+            except commands.BadArgument:
+                return await ctx.reply(view=as_v2(error_notice(tr(gid, "anime.usage", name=name))),
+                                       mention_author=False)
         await _send_anime(ctx.author, ctx.guild, name, member, ctx.send)
 
     @bot.tree.command(name=name, description=f"Send an anime {name} reaction.")
@@ -5497,8 +5515,8 @@ def _register_anime_command(name: str) -> None:
         await _send_anime(interaction.user, interaction.guild, name, member, interaction.followup.send)
 
 
-for _anime_name in ANIME_ACTIONS:
-    _register_anime_command(_anime_name)
+for _action in ANIME_ACTIONS:
+    _register_anime_command(_action)
 
 
 AFK_STATE: dict[tuple[int, int], dict] = {}
@@ -5590,7 +5608,7 @@ async def _afk_on_message(message: discord.Message) -> None:
             )
         except discord.HTTPException:
             pass
-    if bot.user is not None and re.search(rf"<@!?{bot.user.id}>", message.content or ""):
+    if bot.user is not None and re.fullmatch(rf"<@!?{bot.user.id}>", (message.content or "").strip()):
         try:
             await message.channel.send(
                 view=as_v2(base_embed(tr(gid, "bot.hi", name=message.author.display_name),
@@ -6765,10 +6783,10 @@ def _assemble(head_text: str, st: dict, body: str, footer: str, buttons=None, av
         children.append(discord.ui.Section(head, accessory=discord.ui.Thumbnail(url)))
     if st.get("banner"):
         children.append(discord.ui.MediaGallery(discord.MediaGalleryItem(st["banner"])))
-    children += [discord.ui.Separator(), discord.ui.TextDisplay(body), discord.ui.Separator(),
+    children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.TextDisplay(body), discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
                  discord.ui.TextDisplay(footer)]
     if buttons:
-        children += [discord.ui.Separator(), discord.ui.ActionRow(*buttons)]
+        children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small), discord.ui.ActionRow(*buttons)]
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(*children, accent_colour=st.get("color") or STEEL))
     return view
