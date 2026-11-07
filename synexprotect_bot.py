@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.31.3"
+BOT_VERSION = "1.32.4"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -2180,19 +2180,22 @@ SAVE_TRANSCRIPTS = True
 DM_TRANSCRIPT_ON_CLOSE = True
 
 PANEL_COLOR = STEEL
-PANEL_TEXT = """# {member} Ticket Panel
+PANEL_TEXT = """# {member} Support Tickets
 
-Need help or experiencing an issue? Our support team is here to assist you.
+Need help? Our team is here for you.
 
-Open a ticket by selecting the appropriate category and describing your situation in as much detail as possible. A staff member will review your request and assist you as soon as possible.
+**How it works**
+> 1. Pick a category in the menu below.
+> 2. Describe your request in as much detail as you can.
+> 3. A staff member will reply as soon as possible.
 
-**Before opening a ticket:**
-• Avoid opening multiple tickets for the same issue.
-• Provide all necessary information.
-• Treat our support team with respect.
-• Do not abuse the ticket system.
+**Ground rules**
+• One ticket per issue, please.
+• Share all the information you have.
+• Be respectful to the team.
+• Don't open tickets just to test the system.
 
-Thank you for being part of our community! {star}"""
+Thank you for being part of the community! {star}"""
 
 TICKET_TYPES = [
     {
@@ -2226,15 +2229,17 @@ TICKET_TYPES = [
 ]
 
 WELCOME_COLOR = STEEL
-WELCOME_TITLE = "{welcome} Welcome, {username}!"
+WELCOME_TITLE = "{welcome} Hi {username}, thanks for reaching out!"
 WELCOME_BODY = (
-    "Thanks for reaching out to **{server}**. A member of our team will be with you shortly.\n\n"
+    "Your ticket with **{server}** is open. Our team has been notified and will reply as soon as possible.\n\n"
     "{intro}\n\n"
     "> **Category** · {option}\n"
     "> **Ticket** · #{number}\n"
-    "> **Opened** · {opened}"
+    "> **Opened** · {opened}\n\n"
+    "Tip: explain your request in detail, with screenshots if you have them, so we can help faster. "
+    "When your issue is solved, press **Close Ticket** below."
 )
-WELCOME_FOOTER = "Staff tools are above · Only staff can use them"
+
 WELCOME_PING = "{user} {roles}"
 
 TICKETS_FILE = DATA_DIR / "tickets_data.json"
@@ -2753,30 +2758,43 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
     save_tickets()
 
     data, people, html_data = None, {}, None
+    ticket_info = {
+        "number": ticket.get("number"), "type": ticket.get("type"), "owner_id": ticket["user_id"],
+        "claimed_by": ticket.get("claimed_by"), "opened_at": ticket["opened_at"],
+        "closed_by": closed_by, "reason": reason,
+    }
     if SAVE_TRANSCRIPTS:
         data, people = await _collect_transcript(channel)
-        html_data = await _build_html_transcript(channel, {
-            "number": ticket.get("number"), "type": ticket.get("type"), "owner_id": ticket["user_id"],
-            "claimed_by": ticket.get("claimed_by"), "opened_at": ticket["opened_at"],
-            "closed_by": closed_by, "reason": reason,
-        })
+        try:
+            html_data = await _build_html_transcript(channel, ticket_info)
+        except Exception as exc:  # never lose the transcript: fall back to the plain text one
+            print(f"[tickets] html transcript failed for #{channel.name}: {exc!r}")
+            html_data = None
     _save_closed_ticket(channel, ticket, closed_by, data, people)
     duration = fmt_seconds(now_ts() - ticket["opened_at"])
     owner_mention = f"<@{ticket['user_id']}>"
 
     def transcript_file():
-        return discord.File(io.BytesIO(html_data), filename=f"{channel.name}.html") if html_data is not None else None
+        if html_data is not None:
+            return discord.File(io.BytesIO(html_data), filename=f"{channel.name}.html")
+        if data is not None:
+            return discord.File(io.BytesIO(data), filename=f"{channel.name}.txt")
+        return None
 
-    if html_data is not None and TRANSCRIPT_CHANNEL_ID:
-        tchannel = guild.get_channel(TRANSCRIPT_CHANNEL_ID)
-        if tchannel is not None:
-            try:
-                await tchannel.send(
-                    view=as_v2(base_embed("📄 Transcript", f"{channel.name} · opened by {owner_mention}", STEEL)),
-                    file=transcript_file(),
-                )
-            except discord.HTTPException:
-                pass
+    # Transcripts go to the transcripts channel, or to the log channel when none is set.
+    target_id = TRANSCRIPT_CHANNEL_ID or LOGS_CHANNEL_ID
+    tchannel = guild.get_channel(target_id) if target_id else None
+    attachment = transcript_file()
+    if attachment is not None and isinstance(tchannel, discord.TextChannel):
+        try:
+            await tchannel.send(
+                view=as_v2(base_embed("📄 Transcript", f"{channel.name} · opened by {owner_mention}", STEEL)),
+                file=attachment,
+            )
+        except discord.HTTPException as exc:
+            print(f"[tickets] could not post transcript in #{tchannel.name}: {exc!r}")
+    elif attachment is not None:
+        print(f"[tickets] no transcripts channel set for guild {guild.id}")
 
     log = base_embed(f"{E('Error', '🔒')} Ticket closed", color=STEEL)
     log.add_field(name="Channel", value=channel.name, inline=True)
@@ -2795,10 +2813,10 @@ async def _close_ticket(guild: discord.Guild, channel: discord.TextChannel, clos
             if reason:
                 dm_embed.add_field(name="Reason", value=reason[:1024], inline=False)
             try:
-                kwargs = {"file": transcript_file()} if html_data is not None else {}
+                kwargs = {"file": transcript_file()} if attachment is not None else {}
                 await owner.send(view=as_v2(dm_embed), **kwargs)
-            except discord.HTTPException:
-                pass
+            except discord.HTTPException as exc:
+                print(f"[tickets] could not DM transcript to {ticket['user_id']}: {exc!r}")
 
     try:
         await channel.send(view=as_v2(notice("🔒 Closing this ticket in 5 seconds…")))
@@ -3557,6 +3575,48 @@ STRINGS = {
 }
 
 
+STRINGS["en"].update({
+    "common.channel": "Channel",
+    "common.color": "Color",
+    "common.title": "Title",
+    "common.body": "Body",
+    "common.custom": "Custom",
+    "common.default": "Default",
+    "common.default_channel": "Default channel",
+    "common.current": "Current settings for this server.",
+    "boosts.panel.title": "Boost settings",
+    "boosts.pick": "Pick the boost channel",
+    "boosts.btn.text": "Text",
+    "boosts.modal.color": "Boost color",
+    "boosts.modal.color_label": "Color (name or hex, empty = default)",
+    "boosts.modal.title": "Boost title",
+    "boosts.modal.title_label": "Title ({name} {server} {level} {boosts})",
+    "boosts.modal.text": "Boost text",
+    "boosts.modal.text_label": "Text ({name} {server} {level} {boosts})",
+    "boosts.err.color": "Use a color name from the list or a hex code like #9B59B6.",
+})
+STRINGS["es"].update({
+    "common.channel": "Canal",
+    "common.color": "Color",
+    "common.title": "Título",
+    "common.body": "Texto",
+    "common.custom": "Personalizado",
+    "common.default": "Predeterminado",
+    "common.default_channel": "Canal predeterminado",
+    "common.current": "Configuración actual de este servidor.",
+    "boosts.panel.title": "Configuración de boosts",
+    "boosts.pick": "Elige el canal de boosts",
+    "boosts.btn.text": "Texto",
+    "boosts.modal.color": "Color de boosts",
+    "boosts.modal.color_label": "Color (nombre o hex, vacío = predeterminado)",
+    "boosts.modal.title": "Título de boosts",
+    "boosts.modal.title_label": "Título ({name} {server} {level} {boosts})",
+    "boosts.modal.text": "Texto de boosts",
+    "boosts.modal.text_label": "Texto ({name} {server} {level} {boosts})",
+    "boosts.err.color": "Usa un nombre de color de la lista o un código hex como #9B59B6.",
+})
+
+
 def tr(gid, key: str, **kwargs) -> str:
     lang = guild_langs.get(str(gid), "en")
     text = STRINGS.get(lang, {}).get(key) or STRINGS["en"].get(key, key)
@@ -3636,8 +3696,8 @@ async def servername_settings(interaction: discord.Interaction):
     await interaction.response.send_message(view=as_v2(_settings_embed("Server name settings", rows)), ephemeral=True)
 
 
-def _settings_embed(title: str, rows: list[tuple[str, str]]) -> discord.Embed:
-    embed = base_embed(title, "Current settings for this server.", STEEL)
+def _settings_embed(title: str, rows: list[tuple[str, str]], gid=None) -> discord.Embed:
+    embed = base_embed(title, tr(gid, "common.current"), STEEL)
     for name, value in rows:
         embed.add_field(name=name, value=value[:1024], inline=False)
     return embed
@@ -5948,13 +6008,14 @@ async def invites_settings(interaction: discord.Interaction):
 # ============================================================
 def boosts_embed(guild: discord.Guild) -> discord.Embed:
     cfg = boost_config.get(str(guild.id), {})
+    gid = guild.id
     rows = [
-        ("Channel", _channel_text(guild, boost_channel_id(guild.id))),
-        ("Color", f"#{boost_color(guild.id):06X}"),
-        ("Title", "Custom" if cfg.get("title") else "Default"),
-        ("Body", "Custom" if cfg.get("body") else "Default"),
+        (tr(gid, "common.channel"), _channel_text(guild, boost_channel_id(guild.id))),
+        (tr(gid, "common.color"), f"#{boost_color(guild.id):06X}"),
+        (tr(gid, "common.title"), tr(gid, "common.custom") if cfg.get("title") else tr(gid, "common.default")),
+        (tr(gid, "common.body"), tr(gid, "common.custom") if cfg.get("body") else tr(gid, "common.default")),
     ]
-    return _settings_embed("Boost settings", rows)
+    return _settings_embed(tr(gid, "boosts.panel.title"), rows, gid)
 
 
 def _boost_saver(key: str):
@@ -5969,15 +6030,18 @@ async def _save_boost_color(interaction: discord.Interaction, value: str):
         color = parse_color(value) if value else None
     except ValueError:
         return await interaction.response.send_message(
-            view=as_v2(error_notice("Use a color name from the list or a hex code like #9B59B6.")), ephemeral=True)
+            view=as_v2(error_notice(tr(interaction.guild_id, "boosts.err.color"))), ephemeral=True)
     _save_boost_field(interaction.guild_id, "color", color)
     await interaction.response.send_message(view=as_v2(notice(f"{E('true', '✅')} {tr(interaction.guild_id, 'boosts.saved')}")), ephemeral=True)
 
 
 class BoostsPanel(SettingsPanel):
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, gid=None):
+        self.label_overrides = {"default_channel": tr(gid, "common.default_channel"),
+                                "color": tr(gid, "common.color"), "title": tr(gid, "common.title"),
+                                "text": tr(gid, "boosts.btn.text")}
         super().__init__(owner_id)
-        self.add_item(ChannelPick("Pick the boost channel", self._set_channel))
+        self.add_item(ChannelPick(tr(gid, "boosts.pick"), self._set_channel))
 
     def render(self, guild):
         return boosts_embed(guild)
@@ -5994,20 +6058,20 @@ class BoostsPanel(SettingsPanel):
     @discord.ui.button(label="Color", style=discord.ButtonStyle.primary, row=1)
     async def color(self, interaction, button):
         await interaction.response.send_modal(TextModal(
-            "Boost color", "Color (name or hex, empty = default)", None, "#9B59B6", _save_boost_color))
+            tr(interaction.guild_id, "boosts.modal.color"), tr(interaction.guild_id, "boosts.modal.color_label"), None, "#9B59B6", _save_boost_color))
 
     @discord.ui.button(label="Title", style=discord.ButtonStyle.primary, row=1)
     async def title(self, interaction, button):
         cfg = boost_config.get(str(interaction.guild_id), {})
         await interaction.response.send_modal(TextModal(
-            "Boost title", "Title ({name} {server} {level} {boosts})", cfg.get("title"),
+            tr(interaction.guild_id, "boosts.modal.title"), tr(interaction.guild_id, "boosts.modal.title_label"), cfg.get("title"),
             "{name} just boosted {server}!", _boost_saver("title")))
 
     @discord.ui.button(label="Text", style=discord.ButtonStyle.primary, row=1)
     async def text(self, interaction, button):
         cfg = boost_config.get(str(interaction.guild_id), {})
         await interaction.response.send_modal(TextModal(
-            "Boost text", "Text ({name} {server} {level} {boosts})", cfg.get("body"),
+            tr(interaction.guild_id, "boosts.modal.text"), tr(interaction.guild_id, "boosts.modal.text_label"), cfg.get("body"),
             "Thank you so much, {name}!", _boost_saver("body")))
 
 
@@ -6017,7 +6081,7 @@ class BoostsPanel(SettingsPanel):
 @app_commands.guild_only()
 async def boosts_settings(interaction: discord.Interaction):
     await interaction.response.send_message(
-        view=with_body(BoostsPanel(interaction.user.id), boosts_embed(interaction.guild)), ephemeral=True)
+        view=with_body(BoostsPanel(interaction.user.id, interaction.guild_id), boosts_embed(interaction.guild)), ephemeral=True)
 
 
 # ---------- /prefix: nickname prefix for members with a role ----------
@@ -7099,12 +7163,60 @@ suggestions_config: dict[str, dict] = read_json(SUGGESTIONS_FILE, {})
 SUGGESTION_FOOTER = "SynexBotProtect"
 SUGGESTION_GREEN = 0x57F287
 SUGGESTION_RED = 0xED4245
-# status -> (icon, label, colour)
+# status -> (icon, colour)
 SUGGESTION_STATUS = {
-    "pending": ("⏳", "Pending", STEEL),
-    "approved": ("✅", "Approved", SUGGESTION_GREEN),
-    "rejected": ("❌", "Rejected", SUGGESTION_RED),
+    "pending": ("⏳", STEEL),
+    "approved": ("✅", SUGGESTION_GREEN),
+    "rejected": ("❌", SUGGESTION_RED),
 }
+
+STRINGS["en"].update({
+    "sug.status.pending": "Pending",
+    "sug.status.approved": "Approved",
+    "sug.status.rejected": "Rejected",
+    "sug.result.approved": "approved",
+    "sug.result.rejected": "rejected",
+    "sug.embed.title": "💡 Suggestion #{n}",
+    "sug.embed.author": "**Author:** <@{author}>",
+    "sug.embed.status": "**Status:** {icon} {label}",
+    "sug.embed.votes": "**Votes:** 👍 {up} · 👎 {down}",
+    "sug.embed.reason": "**Reason:** {reason}",
+    "sug.embed.reviewer": "**Reviewed by:** <@{reviewer}>",
+    "sug.dm.title": "{icon} Your suggestion #{n} was {result}",
+    "sug.modal.approve": "Approve suggestion",
+    "sug.modal.reject": "Reject suggestion",
+    "sug.modal.reason": "Reason (optional)",
+    "sug.err.staff": "Only staff can approve or reject suggestions.",
+    "sug.err.missing": "I can't find this suggestion in my data.",
+    "sug.err.no_channel": "No suggestion channel is set. An admin can use /suggest-setup.",
+    "sug.done": "Suggestion #{n} {result}.",
+    "sug.setup.ok": "Suggestions will be posted in {channel}.",
+    "sug.sent": "Your suggestion #{n} was sent.",
+})
+
+STRINGS["es"].update({
+    "sug.status.pending": "Pendiente",
+    "sug.status.approved": "Aprobada",
+    "sug.status.rejected": "Rechazada",
+    "sug.result.approved": "aprobada",
+    "sug.result.rejected": "rechazada",
+    "sug.embed.title": "💡 Sugerencia #{n}",
+    "sug.embed.author": "**Autor:** <@{author}>",
+    "sug.embed.status": "**Estado:** {icon} {label}",
+    "sug.embed.votes": "**Votos:** 👍 {up} · 👎 {down}",
+    "sug.embed.reason": "**Motivo:** {reason}",
+    "sug.embed.reviewer": "**Revisada por:** <@{reviewer}>",
+    "sug.dm.title": "{icon} Tu sugerencia #{n} fue {result}",
+    "sug.modal.approve": "Aprobar sugerencia",
+    "sug.modal.reject": "Rechazar sugerencia",
+    "sug.modal.reason": "Motivo (opcional)",
+    "sug.err.staff": "Solo el staff puede aprobar o rechazar sugerencias.",
+    "sug.err.missing": "No encuentro esta sugerencia en mis datos.",
+    "sug.err.no_channel": "No hay canal de sugerencias configurado. Un admin puede usar /suggest-setup.",
+    "sug.done": "Sugerencia #{n} {result}.",
+    "sug.setup.ok": "Las sugerencias se publicarán en {channel}.",
+    "sug.sent": "Tu sugerencia #{n} fue enviada.",
+})
 
 
 def save_suggestions() -> None:
@@ -7115,21 +7227,21 @@ def _sug_guild(gid) -> dict:
     return suggestions_config.setdefault(str(gid), {"items": {}, "next": 1})
 
 
-def _sug_embed(item: dict) -> discord.Embed:
-    icon, label, colour = SUGGESTION_STATUS[item["status"]]
+def _sug_embed(item: dict, gid) -> discord.Embed:
+    icon, colour = SUGGESTION_STATUS[item["status"]]
     safe = item["text"].replace("```", "'''")
     lines = [
         f"```\n{safe}\n```",
-        f"**Author:** <@{item['author']}>",
-        f"**Status:** {icon} {label}",
-        f"**Votes:** 👍 {len(item['up'])} · 👎 {len(item['down'])}",
+        tr(gid, "sug.embed.author", author=item["author"]),
+        tr(gid, "sug.embed.status", icon=icon, label=tr(gid, f"sug.status.{item['status']}")),
+        tr(gid, "sug.embed.votes", up=len(item["up"]), down=len(item["down"])),
     ]
     if item.get("reason"):
-        lines.append(f"**Reason:** {item['reason']}")
+        lines.append(tr(gid, "sug.embed.reason", reason=item["reason"]))
     if item.get("reviewer"):
-        lines.append(f"**Reviewed by:** <@{item['reviewer']}>")
+        lines.append(tr(gid, "sug.embed.reviewer", reviewer=item["reviewer"]))
     embed = discord.Embed(
-        title=f"💡 Suggestion #{item['number']}",
+        title=tr(gid, "sug.embed.title", n=item["number"]),
         description="\n".join(lines),
         color=colour,
         timestamp=datetime.now(timezone.utc))
@@ -7137,9 +7249,9 @@ def _sug_embed(item: dict) -> discord.Embed:
     return embed
 
 
-def _sug_view(item: dict) -> "SuggestionView":
+def _sug_view(item: dict, gid) -> "SuggestionView":
     view = SuggestionView()
-    view.set_body(_sug_embed(item))
+    view.set_body(_sug_embed(item, gid))
     return view
 
 
@@ -7151,12 +7263,13 @@ async def _sug_notify_author(guild: discord.Guild, item: dict) -> None:
     member = guild.get_member(item["author"])
     if member is None:
         return
-    icon, label, colour = SUGGESTION_STATUS[item["status"]]
+    icon, colour = SUGGESTION_STATUS[item["status"]]
     description = f"```\n{item['text'][:300]}\n```"
     if item.get("reason"):
-        description += f"\n**Reason:** {item['reason']}"
+        description += "\n" + tr(guild.id, "sug.embed.reason", reason=item["reason"])
     embed = discord.Embed(
-        title=f"{icon} Your suggestion #{item['number']} was {label.lower()}",
+        title=tr(guild.id, "sug.dm.title", icon=icon, n=item["number"],
+                 result=tr(guild.id, f"sug.result.{item['status']}")),
         description=description,
         color=colour)
     embed.set_footer(text=SUGGESTION_FOOTER)
@@ -7175,35 +7288,38 @@ async def _sug_decide(guild: discord.Guild, channel, message_id: int, reviewer_i
     item["reviewer"] = reviewer_id
     item["reason"] = reason
     save_suggestions()
-    await channel.get_partial_message(message_id).edit(view=_sug_view(item))
+    await channel.get_partial_message(message_id).edit(view=_sug_view(item, guild.id))
     await _sug_notify_author(guild, item)
     return item
 
 
 class SuggestionDecisionModal(discord.ui.Modal):
     """Asks staff for an optional reason before approving or rejecting."""
-    reason = discord.ui.TextInput(label="Reason (optional)", style=discord.TextStyle.paragraph,
+    reason = discord.ui.TextInput(label="Reason", style=discord.TextStyle.paragraph,
                                   required=False, max_length=300)
 
-    def __init__(self, status: str, message_id: int):
-        super().__init__(title="Approve suggestion" if status == "approved" else "Reject suggestion")
+    def __init__(self, gid, status: str, message_id: int):
+        super().__init__(title=tr(gid, "sug.modal.approve" if status == "approved" else "sug.modal.reject"))
+        self.reason.label = tr(gid, "sug.modal.reason")
         self.status = status
         self.message_id = message_id
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        gid = interaction.guild_id
         if not _sug_is_staff(interaction):
             await interaction.response.send_message(
-                view=as_v2(error_notice("Only staff can approve or reject suggestions.")), ephemeral=True)
+                view=as_v2(error_notice(tr(gid, "sug.err.staff"))), ephemeral=True)
             return
         item = await _sug_decide(interaction.guild, interaction.channel, self.message_id, interaction.user.id,
                                  self.status, str(self.reason.value).strip() or None)
         if item is None:
             await interaction.response.send_message(
-                view=as_v2(error_notice("I can't find this suggestion in my data.")), ephemeral=True)
+                view=as_v2(error_notice(tr(gid, "sug.err.missing"))), ephemeral=True)
             return
-        label = SUGGESTION_STATUS[self.status][1].lower()
         await interaction.response.send_message(
-            view=as_v2(notice(f"{E('true', '✅')} Suggestion #{item['number']} {label}.")), ephemeral=True)
+            view=as_v2(notice(f"{E('true', '✅')} " + tr(gid, "sug.done", n=item["number"],
+                                                         result=tr(gid, f"sug.result.{self.status}")))),
+            ephemeral=True)
 
 
 class SuggestionView(V2Panel):
@@ -7215,14 +7331,15 @@ class SuggestionView(V2Panel):
         super().__init__(timeout=None)
 
     async def _press(self, interaction: discord.Interaction, mine: str, other: str) -> None:
-        item = _sug_guild(interaction.guild_id)["items"].get(str(interaction.message.id))
+        gid = interaction.guild_id
+        item = _sug_guild(gid)["items"].get(str(interaction.message.id))
         if item is None:
             await interaction.response.send_message(
-                view=as_v2(error_notice("I can't find this suggestion in my data.")), ephemeral=True)
+                view=as_v2(error_notice(tr(gid, "sug.err.missing"))), ephemeral=True)
             return
         if _sug_is_staff(interaction):
             status = "approved" if mine == "up" else "rejected"
-            await interaction.response.send_modal(SuggestionDecisionModal(status, interaction.message.id))
+            await interaction.response.send_modal(SuggestionDecisionModal(gid, status, interaction.message.id))
             return
         uid = interaction.user.id
         if uid in item[mine]:
@@ -7232,13 +7349,13 @@ class SuggestionView(V2Panel):
             if uid in item[other]:
                 item[other].remove(uid)
         save_suggestions()
-        await interaction.response.edit_message(view=_sug_view(item))
+        await interaction.response.edit_message(view=_sug_view(item, gid))
 
-    @discord.ui.button(emoji="👍", style=discord.ButtonStyle.secondary, custom_id="sug:up")
+    @discord.ui.button(emoji="👍", style=discord.ButtonStyle.success, custom_id="sug:up")
     async def up(self, interaction, button):
         await self._press(interaction, "up", "down")
 
-    @discord.ui.button(emoji="👎", style=discord.ButtonStyle.secondary, custom_id="sug:down")
+    @discord.ui.button(emoji="👎", style=discord.ButtonStyle.danger, custom_id="sug:down")
     async def down(self, interaction, button):
         await self._press(interaction, "down", "up")
 
@@ -7262,7 +7379,8 @@ async def _sug_on_message(message: discord.Message) -> None:
         await message.delete()  # keeps the channel clean; needs Manage Messages
     except discord.HTTPException:
         pass
-    msg = await message.channel.send(view=_sug_view(item), allowed_mentions=discord.AllowedMentions.none())
+    msg = await message.channel.send(view=_sug_view(item, message.guild.id),
+                                     allowed_mentions=discord.AllowedMentions.none())
     cfg.setdefault("items", {})[str(msg.id)] = item
     save_suggestions()
 
@@ -7279,28 +7397,30 @@ async def suggest_setup(interaction: discord.Interaction, channel: discord.TextC
     _sug_guild(interaction.guild_id)["channel"] = channel.id
     save_suggestions()
     await interaction.response.send_message(
-        view=as_v2(notice(f"{E('true', '✅')} Suggestions will be posted in {channel.mention}.")), ephemeral=True)
+        view=as_v2(notice(f"{E('true', '✅')} " + tr(interaction.guild_id, "sug.setup.ok", channel=channel.mention))),
+        ephemeral=True)
 
 
 @bot.tree.command(name="suggest", description="Send a suggestion to the server.")
 @app_commands.describe(text="Your suggestion")
 @app_commands.guild_only()
 async def suggest(interaction: discord.Interaction, text: app_commands.Range[str, 1, 1000]):
-    store = _sug_guild(interaction.guild_id)
+    gid = interaction.guild_id
+    store = _sug_guild(gid)
     channel = interaction.guild.get_channel(store.get("channel") or 0)
     if not isinstance(channel, discord.TextChannel):
         await interaction.response.send_message(
-            view=as_v2(error_notice("No suggestion channel is set. An admin can use /suggest-setup.")), ephemeral=True)
+            view=as_v2(error_notice(tr(gid, "sug.err.no_channel"))), ephemeral=True)
         return
     number = store["next"]
     store["next"] = number + 1
     item = {"number": number, "text": text, "author": interaction.user.id, "status": "pending",
             "up": [], "down": [], "reviewer": None, "reason": None}
-    msg = await channel.send(view=_sug_view(item), allowed_mentions=discord.AllowedMentions.none())
+    msg = await channel.send(view=_sug_view(item, gid), allowed_mentions=discord.AllowedMentions.none())
     store["items"][str(msg.id)] = item
     save_suggestions()
     await interaction.response.send_message(
-        view=as_v2(notice(f"{E('true', '✅')} Your suggestion #{number} was sent.")), ephemeral=True)
+        view=as_v2(notice(f"{E('true', '✅')} " + tr(gid, "sug.sent", n=number))), ephemeral=True)
 
 
 if __name__ == "__main__":
