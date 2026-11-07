@@ -23,7 +23,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 BOT_NAME = "SynexProtectBot"
-BOT_VERSION = "1.31.1"
+BOT_VERSION = "1.31.3"
 
 INK = 0x0B0C0E
 CHARCOAL = 0x1A1C20
@@ -7093,7 +7093,7 @@ async def resync_prefix(ctx: commands.Context):
     )
 
 
-# ---------- Sugerencias: /sugerir publica en el canal de sugerencias; votos y decisión del staff ----------
+# ---------- Suggestions: anything posted in the suggestion channel becomes a suggestion ----------
 SUGGESTIONS_FILE = DATA_DIR / "suggestions.json"
 suggestions_config: dict[str, dict] = read_json(SUGGESTIONS_FILE, {})
 SUGGESTION_FOOTER = "SynexBotProtect"
@@ -7101,9 +7101,9 @@ SUGGESTION_GREEN = 0x57F287
 SUGGESTION_RED = 0xED4245
 # status -> (icon, label, colour)
 SUGGESTION_STATUS = {
-    "pendiente": ("⏳", "Pendiente", STEEL),
-    "aprobada": ("✅", "Aprobada", SUGGESTION_GREEN),
-    "rechazada": ("❌", "Rechazada", SUGGESTION_RED),
+    "pending": ("⏳", "Pending", STEEL),
+    "approved": ("✅", "Approved", SUGGESTION_GREEN),
+    "rejected": ("❌", "Rejected", SUGGESTION_RED),
 }
 
 
@@ -7118,18 +7118,21 @@ def _sug_guild(gid) -> dict:
 def _sug_embed(item: dict) -> discord.Embed:
     icon, label, colour = SUGGESTION_STATUS[item["status"]]
     safe = item["text"].replace("```", "'''")
+    lines = [
+        f"```\n{safe}\n```",
+        f"**Author:** <@{item['author']}>",
+        f"**Status:** {icon} {label}",
+        f"**Votes:** 👍 {len(item['up'])} · 👎 {len(item['down'])}",
+    ]
+    if item.get("reason"):
+        lines.append(f"**Reason:** {item['reason']}")
+    if item.get("reviewer"):
+        lines.append(f"**Reviewed by:** <@{item['reviewer']}>")
     embed = discord.Embed(
-        title=f"💡 Sugerencia #{item['number']}",
-        description=f"```\n{safe}\n```",
+        title=f"💡 Suggestion #{item['number']}",
+        description="\n".join(lines),
         color=colour,
         timestamp=datetime.now(timezone.utc))
-    embed.add_field(name="Autor", value=f"<@{item['author']}>", inline=True)
-    embed.add_field(name="Estado", value=f"{icon} {label}", inline=True)
-    embed.add_field(name="Votos", value=f"👍 {len(item['up'])} · 👎 {len(item['down'])}", inline=True)
-    if item.get("reviewer"):
-        embed.add_field(name="Revisada por", value=f"<@{item['reviewer']}>", inline=True)
-    if item.get("reason"):
-        embed.add_field(name="Motivo", value=item["reason"], inline=False)
     embed.set_footer(text=SUGGESTION_FOOTER)
     return embed
 
@@ -7140,14 +7143,21 @@ def _sug_view(item: dict) -> "SuggestionView":
     return view
 
 
+def _sug_is_staff(interaction: discord.Interaction) -> bool:
+    return isinstance(interaction.user, discord.Member) and is_staff(interaction.user)
+
+
 async def _sug_notify_author(guild: discord.Guild, item: dict) -> None:
     member = guild.get_member(item["author"])
     if member is None:
         return
     icon, label, colour = SUGGESTION_STATUS[item["status"]]
+    description = f"```\n{item['text'][:300]}\n```"
+    if item.get("reason"):
+        description += f"\n**Reason:** {item['reason']}"
     embed = discord.Embed(
-        title=f"{icon} Tu sugerencia #{item['number']} fue {label.lower()}",
-        description=f"```\n{item['text'][:300]}\n```" + (f"\n**Motivo:** {item['reason']}" if item.get("reason") else ""),
+        title=f"{icon} Your suggestion #{item['number']} was {label.lower()}",
+        description=description,
         color=colour)
     embed.set_footer(text=SUGGESTION_FOOTER)
     try:
@@ -7156,60 +7166,63 @@ async def _sug_notify_author(guild: discord.Guild, item: dict) -> None:
         pass  # DMs closed: nothing else to do
 
 
-def _sug_is_staff(interaction: discord.Interaction) -> bool:
-    return isinstance(interaction.user, discord.Member) and is_staff(interaction.user)
-
-
-async def _sug_apply(guild: discord.Guild, channel, message_id: int, reviewer_id: int,
-                     status: str, reason: str | None = None) -> dict | None:
+async def _sug_decide(guild: discord.Guild, channel, message_id: int, reviewer_id: int,
+                      status: str, reason: str | None) -> dict | None:
     item = _sug_guild(guild.id)["items"].get(str(message_id))
     if item is None:
         return None
     item["status"] = status
-    item["reviewer"] = reviewer_id if status != "pendiente" else None
-    item["reason"] = reason if status == "rechazada" else None
+    item["reviewer"] = reviewer_id
+    item["reason"] = reason
     save_suggestions()
     await channel.get_partial_message(message_id).edit(view=_sug_view(item))
-    if status != "pendiente":
-        await _sug_notify_author(guild, item)
+    await _sug_notify_author(guild, item)
     return item
 
 
-class SuggestionReasonModal(discord.ui.Modal, title="Rechazar sugerencia"):
-    reason = discord.ui.TextInput(label="Motivo (opcional)", style=discord.TextStyle.paragraph,
+class SuggestionDecisionModal(discord.ui.Modal):
+    """Asks staff for an optional reason before approving or rejecting."""
+    reason = discord.ui.TextInput(label="Reason (optional)", style=discord.TextStyle.paragraph,
                                   required=False, max_length=300)
 
-    def __init__(self, message_id: int):
-        super().__init__()
+    def __init__(self, status: str, message_id: int):
+        super().__init__(title="Approve suggestion" if status == "approved" else "Reject suggestion")
+        self.status = status
         self.message_id = message_id
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not _sug_is_staff(interaction):
             await interaction.response.send_message(
-                view=as_v2(error_notice("Solo el staff puede rechazar sugerencias.")), ephemeral=True)
+                view=as_v2(error_notice("Only staff can approve or reject suggestions.")), ephemeral=True)
             return
-        item = await _sug_apply(interaction.guild, interaction.channel, self.message_id, interaction.user.id,
-                                "rechazada", str(self.reason.value).strip() or None)
+        item = await _sug_decide(interaction.guild, interaction.channel, self.message_id, interaction.user.id,
+                                 self.status, str(self.reason.value).strip() or None)
         if item is None:
             await interaction.response.send_message(
-                view=as_v2(error_notice("No encuentro esta sugerencia en mis datos.")), ephemeral=True)
+                view=as_v2(error_notice("I can't find this suggestion in my data.")), ephemeral=True)
             return
+        label = SUGGESTION_STATUS[self.status][1].lower()
         await interaction.response.send_message(
-            view=as_v2(notice(f"{E('true', '✅')} Sugerencia #{item['number']} rechazada.")), ephemeral=True)
+            view=as_v2(notice(f"{E('true', '✅')} Suggestion #{item['number']} {label}.")), ephemeral=True)
 
 
 class SuggestionView(V2Panel):
-    """Buttons under each suggestion. Timeout is None and every button has a custom_id, so the
-    buttons keep working after a restart (the bot registers this view in bot.add_view)."""
+    """Two buttons: thumbs up and thumbs down. Anyone can vote. Staff use them to decide:
+    thumbs up approves, thumbs down rejects, and both open a box for an optional reason.
+    Timeout is None and every button has a custom_id, so they keep working after a restart."""
 
     def __init__(self):
         super().__init__(timeout=None)
 
-    async def _vote(self, interaction: discord.Interaction, mine: str, other: str) -> None:
+    async def _press(self, interaction: discord.Interaction, mine: str, other: str) -> None:
         item = _sug_guild(interaction.guild_id)["items"].get(str(interaction.message.id))
         if item is None:
             await interaction.response.send_message(
-                view=as_v2(error_notice("No encuentro esta sugerencia en mis datos.")), ephemeral=True)
+                view=as_v2(error_notice("I can't find this suggestion in my data.")), ephemeral=True)
+            return
+        if _sug_is_staff(interaction):
+            status = "approved" if mine == "up" else "rejected"
+            await interaction.response.send_modal(SuggestionDecisionModal(status, interaction.message.id))
             return
         uid = interaction.user.id
         if uid in item[mine]:
@@ -7221,85 +7234,73 @@ class SuggestionView(V2Panel):
         save_suggestions()
         await interaction.response.edit_message(view=_sug_view(item))
 
-    @discord.ui.button(label="Me gusta", emoji="👍", style=discord.ButtonStyle.secondary, custom_id="sug:up")
+    @discord.ui.button(emoji="👍", style=discord.ButtonStyle.secondary, custom_id="sug:up")
     async def up(self, interaction, button):
-        await self._vote(interaction, "up", "down")
+        await self._press(interaction, "up", "down")
 
-    @discord.ui.button(label="No me gusta", emoji="👎", style=discord.ButtonStyle.secondary, custom_id="sug:down")
+    @discord.ui.button(emoji="👎", style=discord.ButtonStyle.secondary, custom_id="sug:down")
     async def down(self, interaction, button):
-        await self._vote(interaction, "down", "up")
-
-    @discord.ui.button(label="Aprobar", emoji="✅", style=discord.ButtonStyle.success, custom_id="sug:approve")
-    async def approve(self, interaction, button):
-        if not _sug_is_staff(interaction):
-            await interaction.response.send_message(
-                view=as_v2(error_notice("Solo el staff puede aprobar sugerencias.")), ephemeral=True)
-            return
-        item = await _sug_apply(interaction.guild, interaction.channel, interaction.message.id,
-                                interaction.user.id, "aprobada")
-        if item is None:
-            await interaction.response.send_message(
-                view=as_v2(error_notice("No encuentro esta sugerencia en mis datos.")), ephemeral=True)
-            return
-        await interaction.response.edit_message(view=_sug_view(item))
-
-    @discord.ui.button(label="Rechazar", emoji="❌", style=discord.ButtonStyle.danger, custom_id="sug:reject")
-    async def reject(self, interaction, button):
-        if not _sug_is_staff(interaction):
-            await interaction.response.send_message(
-                view=as_v2(error_notice("Solo el staff puede rechazar sugerencias.")), ephemeral=True)
-            return
-        await interaction.response.send_modal(SuggestionReasonModal(interaction.message.id))
-
-    @discord.ui.button(label="Pendiente", emoji="⏳", style=discord.ButtonStyle.secondary, custom_id="sug:pending")
-    async def pending(self, interaction, button):
-        if not _sug_is_staff(interaction):
-            await interaction.response.send_message(
-                view=as_v2(error_notice("Solo el staff puede cambiar el estado.")), ephemeral=True)
-            return
-        item = await _sug_apply(interaction.guild, interaction.channel, interaction.message.id,
-                                interaction.user.id, "pendiente")
-        if item is None:
-            await interaction.response.send_message(
-                view=as_v2(error_notice("No encuentro esta sugerencia en mis datos.")), ephemeral=True)
-            return
-        await interaction.response.edit_message(view=_sug_view(item))
+        await self._press(interaction, "down", "up")
 
 
 bot.add_view(SuggestionView())
 
 
-@bot.tree.command(name="sugerencias-setup", description="Set the channel where suggestions are posted.")
-@app_commands.describe(canal="The channel for suggestions")
+async def _sug_on_message(message: discord.Message) -> None:
+    """Anything written in the suggestion channel becomes a suggestion by its author."""
+    if message.author.bot or message.guild is None or not message.content.strip():
+        return
+    cfg = suggestions_config.get(str(message.guild.id))
+    if not cfg or cfg.get("channel") != message.channel.id:
+        return
+    text = message.content.strip()[:1000]
+    number = cfg.get("next", 1)
+    cfg["next"] = number + 1
+    item = {"number": number, "text": text, "author": message.author.id, "status": "pending",
+            "up": [], "down": [], "reviewer": None, "reason": None}
+    try:
+        await message.delete()  # keeps the channel clean; needs Manage Messages
+    except discord.HTTPException:
+        pass
+    msg = await message.channel.send(view=_sug_view(item), allowed_mentions=discord.AllowedMentions.none())
+    cfg.setdefault("items", {})[str(msg.id)] = item
+    save_suggestions()
+
+
+bot.add_listener(_sug_on_message, "on_message")
+
+
+@bot.tree.command(name="suggest-setup", description="Choose the channel where suggestions are posted.")
+@app_commands.describe(channel="The suggestions channel")
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.guild_only()
-async def sugerencias_setup(interaction: discord.Interaction, canal: discord.TextChannel):
-    _sug_guild(interaction.guild_id)["channel"] = canal.id
+async def suggest_setup(interaction: discord.Interaction, channel: discord.TextChannel):
+    _sug_guild(interaction.guild_id)["channel"] = channel.id
     save_suggestions()
     await interaction.response.send_message(
-        view=as_v2(notice(f"{E('true', '✅')} Las sugerencias se publicarán en {canal.mention}.")), ephemeral=True)
+        view=as_v2(notice(f"{E('true', '✅')} Suggestions will be posted in {channel.mention}.")), ephemeral=True)
 
 
-@bot.tree.command(name="sugerir", description="Send a suggestion to the server.")
-@app_commands.describe(texto="Your suggestion")
+@bot.tree.command(name="suggest", description="Send a suggestion to the server.")
+@app_commands.describe(text="Your suggestion")
 @app_commands.guild_only()
-async def sugerir(interaction: discord.Interaction, texto: app_commands.Range[str, 1, 1000]):
+async def suggest(interaction: discord.Interaction, text: app_commands.Range[str, 1, 1000]):
     store = _sug_guild(interaction.guild_id)
     channel = interaction.guild.get_channel(store.get("channel") or 0)
     if not isinstance(channel, discord.TextChannel):
         await interaction.response.send_message(
-            view=as_v2(error_notice("No hay canal de sugerencias configurado. Usa /sugerencias-setup.")), ephemeral=True)
+            view=as_v2(error_notice("No suggestion channel is set. An admin can use /suggest-setup.")), ephemeral=True)
         return
     number = store["next"]
     store["next"] = number + 1
-    item = {"number": number, "text": texto, "author": interaction.user.id, "status": "pendiente",
+    item = {"number": number, "text": text, "author": interaction.user.id, "status": "pending",
             "up": [], "down": [], "reviewer": None, "reason": None}
     msg = await channel.send(view=_sug_view(item), allowed_mentions=discord.AllowedMentions.none())
     store["items"][str(msg.id)] = item
     save_suggestions()
     await interaction.response.send_message(
-        view=as_v2(notice(f"{E('true', '✅')} Tu sugerencia #{number} fue enviada.")), ephemeral=True)
+        view=as_v2(notice(f"{E('true', '✅')} Your suggestion #{number} was sent.")), ephemeral=True)
 
 
 if __name__ == "__main__":
